@@ -24,7 +24,11 @@ RUN apt-get update && \
 COPY . /src
 
 WORKDIR /tmp/build
-RUN /src/configure --prefix=/opt/qemu --target-list=riscv32-softmmu,riscv64-softmmu,riscv32-linux-user,riscv64-linux-user && make -j && make install
+RUN /src/configure --prefix=/opt/qemu \
+                   --target-list=riscv32-softmmu,riscv64-softmmu,riscv32-linux-user,riscv64-linux-user \
+                   --enable-plugins && \
+    make -j && \
+    make install
 
 # Copy the built qemu into a fresh image.
 FROM ubuntu:20.04 as qemu
@@ -32,6 +36,16 @@ COPY --from=qemu_builder /opt/qemu /opt/qemu
 ENV PATH "${PATH}:/opt/qemu/bin"
 
 RUN apt-get update && \
-    apt-get -y -qq install libaio1 libbz2-1.0 libcap2 libcap-ng0 libcurl4 libglib2.0-0 libfdt1 liblzo2-2 libpixman-1-0 libssh2-1 zlib1g && \
+    apt-get -y -qq install libaio1 \
+                           libbz2-1.0 \
+                           libcap2 \
+                           libcap-ng0 \
+                           libcurl4 \
+                           libglib2.0-0 \
+                           libfdt1 \
+                           liblzo2-2 \
+                           libpixman-1-0 \
+                           libssh2-1 \
+                           zlib1g && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists
