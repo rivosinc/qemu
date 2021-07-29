@@ -28,11 +28,13 @@ RUN /src/configure --prefix=/opt/qemu \
                    --target-list=riscv32-softmmu,riscv64-softmmu,riscv32-linux-user,riscv64-linux-user \
                    --enable-plugins && \
     make -j && \
+    make plugins && \
     make install
 
 # Copy the built qemu into a fresh image.
 FROM ubuntu:20.04 as qemu
 COPY --from=qemu_builder /opt/qemu /opt/qemu
+COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /opt/qemu/plugins/
 ENV PATH "${PATH}:/opt/qemu/bin"
 
 RUN apt-get update && \
