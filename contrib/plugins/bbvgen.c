@@ -13,6 +13,14 @@
  * BB will continue to accumulate counts for entry at the top/original
  * PC.
  *
+ * A second argument should be provided to create a gzipped "info"
+ * file to go along with the BBV. This file contains a line per
+ * interval giving the initial PC, instruction count at the start, and
+ * size of the interval. A final line gives the complete executed
+ * instructions. Currently a BBV filename has to provided as the first
+ * argument in order to activate this feature,
+ * e.g. "libbbvgen.so,arg=bbv.gz,arg=bbvi.gz"
+ *
  * NOTE: this plugin can be distributed separately and built against
  * QEMU headers. For simplicity we'll just add it to the existing
  * contrib/plugins area for now.
@@ -38,6 +46,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static const char *filename = "bbv.gz";
 static gzFile bbv_file;
+static gzFile bbvi_file;
 
 static GMutex lock;
 static GHashTable *allblocks;
@@ -45,6 +54,10 @@ static GHashTable *allblocks;
 static uint64_t intv_length = 100000000; /* TODO: runtime argument */
 static uint64_t cur_insns = 0;  /* interval duration tracker */
 static uint64_t bb_id = 1;      /* bb ids are assigned once */
+
+static uint32_t interval = 0;
+static uint64_t intv_start_pc = -1;
+static uint64_t total_insns = 0;
 
 typedef struct {
     uint64_t id;
@@ -58,16 +71,6 @@ static gint cmp_bbid(gconstpointer a, gconstpointer b)
     BlockInfo *ea = (BlockInfo *) a;
     BlockInfo *eb = (BlockInfo *) b;
     return (ea->id < eb->id) ? -1 : 1;
-}
-
-static void plugin_exit(qemu_plugin_id_t id, void *p)
-{
-    gzclose_w(bbv_file);
-}
-
-static void plugin_init(void)
-{
-    allblocks = g_hash_table_new(NULL, g_direct_equal);
 }
 
 static void dump_interval(GList *blocks)
@@ -104,18 +107,8 @@ static void zero_count(gpointer data,
     cnt->exec_count = 0;
 }
 
-static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
+static void end_interval(void)
 {
-    uint64_t hash = (uint64_t) udata;
-
-    // The callback has to run for every TB execution so we can detect
-    // the end of an interval. Most of the time we just bail
-    // immediately. Note that inline operations (counter increment)
-    // run after callbacks.
-    if (cur_insns < intv_length) {
-      return;
-    }
-
     // Create a list of just the blocks that executed during this
     // interval, then sort them by ID before emitting.
     GList *blocks = NULL;
@@ -127,19 +120,62 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     g_list_foreach(blocks, zero_count, NULL);
     g_list_free(blocks);
 
+    gzprintf(bbvi_file, "BBV %6u: start pc 0x%"PRIx64" @ icount %15"PRIu64" len %15"PRIu64"\n",
+             interval, intv_start_pc, total_insns, cur_insns);
+}
+
+static void plugin_exit(qemu_plugin_id_t id, void *p)
+{
+    end_interval();
+    total_insns += cur_insns;
+    gzclose_w(bbv_file);
+    gzprintf(bbvi_file, "Total instructions: %"PRIu64"\n", total_insns);
+    gzclose_w(bbvi_file);
+}
+
+static void plugin_init(void)
+{
+    allblocks = g_hash_table_new(NULL, g_direct_equal);
+}
+
+static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
+{
+    // The callback has to run for every TB execution so we can detect
+    // the end of an interval. Most of the time we just bail
+    // immediately. Note that inline operations (counter increment)
+    // run after callbacks.
+    if (cur_insns < intv_length) {
+      return;
+    }
+
+    end_interval();
+
+    // Remember the PC that started each interval
+    const uint64_t hash = (uint64_t) udata;
+    BlockInfo *cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+    intv_start_pc = cnt->start_addr;
+
     // Start counting the next interval
+    total_insns += cur_insns;
     cur_insns = 0;
+    interval++;
 }
 
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 {
     BlockInfo *cnt;
-    uint64_t pc = qemu_plugin_tb_vaddr(tb);
-    size_t insns = qemu_plugin_tb_n_insns(tb);
+    const uint64_t pc = qemu_plugin_tb_vaddr(tb);
+    const size_t insns = qemu_plugin_tb_n_insns(tb);
+
+    // Special case the initial PC since hereafter these are latched
+    // on interval instruction count overflow in the tb_exec callback.
+    if (intv_start_pc == -1) {
+      intv_start_pc = pc;
+    }
 
     // The start PC should uniquely identify a BB, even as previous
     // blocks are carved up by new branches into them.
-    uint64_t hash = pc >> 1;
+    const uint64_t hash = pc >> 1;
 
     g_mutex_lock(&lock);
     cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
@@ -180,6 +216,13 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
     bbv_file = gzopen(filename, "wb9");
     if (bbv_file == Z_NULL) {
       return -1;
+    }
+    if (argc > 1 && argv[1]) {
+      bbvi_file = gzopen(argv[1], "wb9");
+      if (bbvi_file == Z_NULL) {
+        gzclose_w(bbv_file);
+        return -1;
+      }
     }
 
     plugin_init();
