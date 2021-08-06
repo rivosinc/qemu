@@ -51,7 +51,7 @@ static gzFile bbvi_file;
 static GMutex lock;
 static GHashTable *allblocks;
 
-static uint64_t intv_length = 100000000; /* TODO: runtime argument */
+static uint64_t intv_length = 200000000; /* TODO: runtime argument */
 static uint64_t cur_insns = 0;  /* interval duration tracker */
 static uint64_t bb_id = 1;      /* bb ids are assigned once */
 
