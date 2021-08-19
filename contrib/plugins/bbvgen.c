@@ -16,9 +16,12 @@
  * A second argument should be provided to create a gzipped "info"
  * file to go along with the BBV. This file contains a line per
  * interval giving the initial PC, instruction count at the start, and
- * size of the interval. A final line gives the complete executed
- * instructions. Currently a BBV filename has to provided as the first
- * argument in order to activate this feature,
+ * size of the interval. After this line, the top 10 basic blocks (by
+ * dynamic instruction count) are listed with PC and instruction
+ * count. At the end of execution, another line gives the complete
+ * executed instructions count, followed by a dump of the top 10
+ * blocks across the entire run. Currently a BBV filename has to
+ * provided as the first argument in order to activate this feature,
  * e.g. "libbbvgen.so,arg=bbv.gz,arg=bbvi.gz"
  *
  * NOTE: this plugin can be distributed separately and built against
@@ -51,6 +54,8 @@ static gzFile bbvi_file;
 static GMutex lock;
 static GHashTable *allblocks;
 
+static const unsigned hot_count = 10;
+
 static uint64_t intv_length = 200000000; /* TODO: runtime argument */
 static uint64_t cur_insns = 0;  /* interval duration tracker */
 static uint64_t bb_id = 1;      /* bb ids are assigned once */
@@ -63,6 +68,7 @@ typedef struct {
     uint64_t id;
     uint64_t start_addr;
     uint64_t exec_count;
+    uint64_t total_count;
     unsigned long insns;
 } BlockInfo;
 
@@ -71,6 +77,13 @@ static gint cmp_bbid(gconstpointer a, gconstpointer b)
     BlockInfo *ea = (BlockInfo *) a;
     BlockInfo *eb = (BlockInfo *) b;
     return (ea->id < eb->id) ? -1 : 1;
+}
+
+static gint cmp_exec_count(gconstpointer a, gconstpointer b)
+{
+    BlockInfo *ea = (BlockInfo *) a;
+    BlockInfo *eb = (BlockInfo *) b;
+    return ea->exec_count > eb->exec_count ? -1 : 1;
 }
 
 static void dump_interval(GList *blocks)
@@ -100,11 +113,39 @@ static void filter_block(gpointer key,
     }
 }
 
-static void zero_count(gpointer data,
-                       gpointer user_data)
+static void filter_block_final(gpointer key,
+                               gpointer value,
+                               gpointer user_data)
+{
+    GList **blocks = (GList **)user_data;
+    BlockInfo *cnt = (BlockInfo *) value;
+    // Move the total_count into exec_count, so the final top blocks
+    // summary can reuse cmp_exec_count and print_hot_blocks.
+    cnt->exec_count = cnt->total_count;
+    if (cnt->exec_count > 0) {
+        *blocks = g_list_prepend(*blocks, value);
+    }
+}
+
+static void latch_count(gpointer data,
+                        gpointer user_data)
 {
     BlockInfo *cnt = (BlockInfo *) data;
+    // Accumulate the total count for the final summary; reset the
+    // exec count for the next interval.
+    cnt->total_count += cnt->exec_count;
     cnt->exec_count = 0;
+}
+
+static void print_hot_blocks(GList *blocks, unsigned count, uint64_t region_count)
+{
+    GList *it = blocks;
+    for (unsigned i = 0; (i < count) && it; i++, it = it->next) {
+        BlockInfo *block = (BlockInfo *)it->data;
+        gzprintf(bbvi_file, "  BBV start pc 0x%"PRIx64" x %3lu @ icount %15"PRIu64"    %5.2f%%\n",
+                 block->start_addr, block->insns, block->exec_count,
+                 (float)block->exec_count*100 / region_count);
+    }
 }
 
 static void end_interval(void)
@@ -117,11 +158,18 @@ static void end_interval(void)
 
     // Generate the vector for this interval then zero the counts.
     dump_interval(blocks);
-    g_list_foreach(blocks, zero_count, NULL);
-    g_list_free(blocks);
 
-    gzprintf(bbvi_file, "BBV %6u: start pc 0x%"PRIx64" @ icount %15"PRIu64" len %15"PRIu64"\n",
-             interval, intv_start_pc, total_insns, cur_insns);
+    if (bbvi_file != Z_NULL) {
+        gzprintf(bbvi_file, "BBV %6u: start pc 0x%"PRIx64" @ icount %15"PRIu64" len %15"PRIu64"\n",
+                 interval, intv_start_pc, total_insns, cur_insns);
+
+        // Print the top N blocks w/ PC and instruction count
+        blocks = g_list_sort(blocks, cmp_exec_count);
+        print_hot_blocks(blocks, hot_count, cur_insns);
+    }
+
+    g_list_foreach(blocks, latch_count, NULL);
+    g_list_free(blocks);
 }
 
 static void plugin_exit(qemu_plugin_id_t id, void *p)
@@ -129,8 +177,19 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
     end_interval();
     total_insns += cur_insns;
     gzclose_w(bbv_file);
-    gzprintf(bbvi_file, "Total instructions: %"PRIu64"\n", total_insns);
-    gzclose_w(bbvi_file);
+
+    if (bbvi_file != Z_NULL) {
+        gzprintf(bbvi_file, "Total instructions: %"PRIu64"\n", total_insns);
+
+        // Pull the top blocks from the entire run and print_hot_blocks
+        GList *blocks = NULL;
+        g_hash_table_foreach(allblocks, filter_block_final, (gpointer)&blocks);
+        blocks = g_list_sort(blocks, cmp_exec_count);
+        print_hot_blocks(blocks, hot_count, total_insns);
+        g_list_free(blocks);
+
+        gzclose_w(bbvi_file);
+    }
 }
 
 static void plugin_init(void)
