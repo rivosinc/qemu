@@ -137,15 +137,19 @@ static void latch_count(gpointer data,
     cnt->exec_count = 0;
 }
 
-static void print_hot_blocks(GList *blocks, unsigned count, uint64_t region_count)
+static void print_hot_blocks(GList *blocks, unsigned count, uint64_t region_count, unsigned indent)
 {
     GList *it = blocks;
     for (unsigned i = 0; (i < count) && it; i++, it = it->next) {
         BlockInfo *block = (BlockInfo *)it->data;
-        gzprintf(bbvi_file, "  BBV start pc 0x%"PRIx64" x %3lu @ icount %15"PRIu64"    %5.2f%%\n",
-                 block->start_addr, block->insns, block->exec_count,
+        if (i > 0) {
+            gzprintf(bbvi_file, ",\n");
+        }
+        gzprintf(bbvi_file, "%*s{\"pc\" : %"PRIu64", \"len\" : %lu, \"icount\" : %"PRIu64", \"pct\": %.2f }",
+                 indent, " ", block->start_addr, block->insns, block->exec_count,
                  (float)block->exec_count*100 / region_count);
     }
+    gzprintf(bbvi_file, "\n");
 }
 
 static void end_interval(void)
@@ -160,12 +164,17 @@ static void end_interval(void)
     dump_interval(blocks);
 
     if (bbvi_file != Z_NULL) {
-        gzprintf(bbvi_file, "BBV %6u: start pc 0x%"PRIx64" @ icount %15"PRIu64" len %15"PRIu64"\n",
-                 interval, intv_start_pc, total_insns, cur_insns);
+        if (interval > 0) {
+            gzprintf(bbvi_file, ",\n");
+        }
+        gzprintf(bbvi_file, "        {\n            \"index\" : %u, \"pc\" : %"PRIu64", \"len\" : %"PRIu64
+                 ", \"icount\" : %"PRIu64", \"blocks\" : [\n", interval, intv_start_pc,
+                 cur_insns, total_insns);
 
         // Print the top N blocks w/ PC and instruction count
         blocks = g_list_sort(blocks, cmp_exec_count);
-        print_hot_blocks(blocks, hot_count, cur_insns);
+        print_hot_blocks(blocks, hot_count, cur_insns, 16);
+        gzprintf(bbvi_file, "            ]\n        }");
     }
 
     g_list_foreach(blocks, latch_count, NULL);
@@ -179,15 +188,19 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
     gzclose_w(bbv_file);
 
     if (bbvi_file != Z_NULL) {
-        gzprintf(bbvi_file, "Total instructions: %"PRIu64"\n", total_insns);
+        gzprintf(bbvi_file, "\n    ],\n");
+        gzprintf(bbvi_file, "    \"instructions\" : %"PRIu64",\n", total_insns);
 
         // Pull the top blocks from the entire run and print_hot_blocks
         GList *blocks = NULL;
         g_hash_table_foreach(allblocks, filter_block_final, (gpointer)&blocks);
         blocks = g_list_sort(blocks, cmp_exec_count);
-        print_hot_blocks(blocks, hot_count, total_insns);
+        gzprintf(bbvi_file, "    \"blocks\" : [\n");
+        print_hot_blocks(blocks, hot_count, total_insns, 8);
+        gzprintf(bbvi_file, "    ]\n");
         g_list_free(blocks);
 
+        gzprintf(bbvi_file, "}\n");
         gzclose_w(bbvi_file);
     }
 }
@@ -195,6 +208,7 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
 static void plugin_init(void)
 {
     allblocks = g_hash_table_new(NULL, g_direct_equal);
+    gzprintf(bbvi_file, "{\n    \"intervals\" : [\n");
 }
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
