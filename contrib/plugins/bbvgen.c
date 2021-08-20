@@ -59,6 +59,7 @@ static const unsigned hot_count = 10;
 static uint64_t intv_length = 200000000; /* TODO: runtime argument */
 static uint64_t cur_insns = 0;  /* interval duration tracker */
 static uint64_t bb_id = 1;      /* bb ids are assigned once */
+static uint64_t drift = 0;      /* track drift of interval start */
 
 static uint32_t interval = 0;
 static uint64_t intv_start_pc = -1;
@@ -217,7 +218,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     // the end of an interval. Most of the time we just bail
     // immediately. Note that inline operations (counter increment)
     // run after callbacks.
-    if (cur_insns < intv_length) {
+    if (cur_insns + drift < intv_length) {
       return;
     }
 
@@ -227,6 +228,10 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     const uint64_t hash = (uint64_t) udata;
     BlockInfo *cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
     intv_start_pc = cnt->start_addr;
+
+    // Track drift due to ending intervals on block boundaries. We
+    // want interval starts to stay close to (intv_num * intv_length).
+    drift = (cur_insns + drift) - intv_length;
 
     // Start counting the next interval
     total_insns += cur_insns;
