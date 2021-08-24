@@ -54,9 +54,9 @@ static gzFile bbvi_file;
 static GMutex lock;
 static GHashTable *allblocks;
 
-static const unsigned hot_count = 10;
+static unsigned hot_count = 10; /* override using QEMU_BBV_BLOCKS */
+static uint64_t intv_length = 200000000; /* override using QEMU_BBV_INTERVAL */
 
-static uint64_t intv_length = 200000000; /* TODO: runtime argument */
 static uint64_t cur_insns = 0;  /* interval duration tracker */
 static uint64_t bb_id = 1;      /* bb ids are assigned once */
 static uint64_t drift = 0;      /* track drift of interval start */
@@ -209,7 +209,8 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
 static void plugin_init(void)
 {
     allblocks = g_hash_table_new(NULL, g_direct_equal);
-    gzprintf(bbvi_file, "{\n    \"intervals\" : [\n");
+    gzprintf(bbvi_file, "{\n    \"source\" : \"qemu-bbvgen\",\n");
+    gzprintf(bbvi_file, "    \"intervals\" : [\n");
 }
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
@@ -301,6 +302,15 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         gzclose_w(bbv_file);
         return -1;
       }
+    }
+
+    char *opt = getenv("QEMU_BBV_INTERVAL");
+    if (opt != NULL) {
+        intv_length = strtoull(opt, NULL, 0);
+    }
+    opt = getenv("QEMU_BBV_BLOCKS");
+    if (opt != NULL) {
+        hot_count = strtoul(opt, NULL, 0);
     }
 
     plugin_init();
