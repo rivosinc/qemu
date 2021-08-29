@@ -24,7 +24,7 @@ RUN apt-get update && \
 COPY . /src
 
 WORKDIR /tmp/build
-RUN /src/configure --prefix=/opt/qemu \
+RUN /src/configure --prefix=/rivos/qemu \
                    --target-list=riscv32-softmmu,riscv64-softmmu,riscv32-linux-user,riscv64-linux-user \
                    --enable-plugins && \
     make -j && \
@@ -33,9 +33,9 @@ RUN /src/configure --prefix=/opt/qemu \
 
 # Copy the built qemu into a fresh image.
 FROM ubuntu:20.04 as qemu
-COPY --from=qemu_builder /opt/qemu /opt/qemu
-COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /opt/qemu/plugins/
-ENV PATH "${PATH}:/opt/qemu/bin"
+COPY --from=qemu_builder /rivos/qemu /rivos/qemu
+COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /rivos/qemu/plugins/
+ENV PATH "${PATH}:/rivos/qemu/bin"
 
 RUN apt-get update && \
     apt-get -y -qq install libaio1 \
