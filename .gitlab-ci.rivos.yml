@@ -1,3 +1,6 @@
+variables:
+  DOCKER_TLS_CERTDIR: ""
+
 docker-build:
   # Use the official docker image.
   image: docker:latest
