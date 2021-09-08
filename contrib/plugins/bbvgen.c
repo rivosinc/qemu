@@ -254,7 +254,7 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 
     // The start PC should uniquely identify a BB, even as previous
     // blocks are carved up by new branches into them.
-    const uint64_t hash = pc >> 1;
+    const uint64_t hash = pc;
 
     g_mutex_lock(&lock);
     cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
