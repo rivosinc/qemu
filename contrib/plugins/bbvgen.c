@@ -49,6 +49,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static gzFile bbv_file = Z_NULL;
 static gzFile bbvi_file = Z_NULL;
+static bool do_fetch_stats = false;
 
 static GMutex lock;
 static GHashTable *allblocks;
@@ -67,10 +68,37 @@ static uint64_t total_insns = 0;
 typedef struct {
     uint64_t id;
     uint64_t start_addr;
+    uint64_t last_pc;
     uint64_t exec_count;
     uint64_t total_count;
-    unsigned long insns;
+    uint32_t insns;
+    uint32_t bytes;
+    uint16_t *off_to_inst;
 } BlockInfo;
+
+// Taken-branch detection requires some information on the previous
+// translation block.
+static BlockInfo *prev_block = NULL;
+
+// Storage for branch distance histogram
+static uint64_t deltas[64] = {};
+
+enum { FETCH_64B, FETCH_2x32B, NUM_FETCH_ALGO };
+
+// Buckets need to cover 1/2/../33 instructions and 2/4/../66 bytes,
+// because of the case where a 4B instruction falls at byte 62.
+#define BUCKETS 33
+
+struct fetch_info {
+    uint64_t total;
+    uint32_t insts;
+    uint32_t bytes;
+    uint64_t inst_buckets[BUCKETS];
+    uint64_t bytes_buckets[BUCKETS];
+    bool one_taken;
+    uint8_t  kind;
+};
+static struct fetch_info finfos[NUM_FETCH_ALGO];
 
 static gint cmp_bbid(gconstpointer a, gconstpointer b)
 {
@@ -120,7 +148,7 @@ static void filter_block_final(gpointer key,
     GList **blocks = (GList **)user_data;
     BlockInfo *cnt = (BlockInfo *) value;
     // Move the total_count into exec_count, so the final top blocks
-    // summary can reuse cmp_exec_count and print_hot_blocks.
+    // summary can reuse cmp_exec_count and emit_hot_blocks.
     cnt->exec_count = cnt->total_count;
     if (cnt->exec_count > 0) {
         *blocks = g_list_prepend(*blocks, value);
@@ -137,7 +165,7 @@ static void latch_count(gpointer data,
     cnt->exec_count = 0;
 }
 
-static void print_hot_blocks(GList *blocks, unsigned count, uint64_t region_count, unsigned indent)
+static void emit_hot_blocks(GList *blocks, unsigned count, uint64_t region_count, unsigned indent)
 {
     GList *it = blocks;
     for (unsigned i = 0; (i < count) && it; i++, it = it->next) {
@@ -173,12 +201,39 @@ static void end_interval(void)
 
         // Print the top N blocks w/ PC and instruction count
         blocks = g_list_sort(blocks, cmp_exec_count);
-        print_hot_blocks(blocks, hot_count, cur_insns, 16);
+        emit_hot_blocks(blocks, hot_count, cur_insns, 16);
         gzprintf(bbvi_file, "            ]\n        }");
     }
 
     g_list_foreach(blocks, latch_count, NULL);
     g_list_free(blocks);
+}
+
+static void emit_fetch_stats_array(struct fetch_info *info, bool insts, unsigned indent, bool more)
+{
+    gzprintf(bbvi_file, "%*s\"%s-distr\" : [\n", indent, " ", insts ? "inst" : "bytes");
+    for (unsigned i = 0; i < BUCKETS; i++) {
+        const bool last = (i == BUCKETS-1);
+        if (insts) {
+            gzprintf(bbvi_file, "%*s{ \"value\" : %u, \"count\" : %" PRIu64 ", \"pct\" : %.2f }%s\n",
+                     indent+4, " ", i+1, info->inst_buckets[i], last ? "" : ",",
+                     100.0 * (double)info->inst_buckets[i]/info->total);
+        } else {
+            gzprintf(bbvi_file, "%*s{ \"value\" : %u, \"count\" : %" PRIu64 ", \"pct\" : %.2f }%s\n",
+                     indent+4, " ", (i+1) * 2, info->bytes_buckets[i], last ? "" : ",",
+                     100.0 * (double)info->bytes_buckets[i]/info->total);
+        }
+    }
+    gzprintf(bbvi_file, "%*s]%s\n", indent, " ", more ? "," : "");
+}
+
+static void emit_fetch_stats(struct fetch_info *info, unsigned indent, bool more)
+{
+    gzprintf(bbvi_file, "%*s\"%s\" : {\n", indent, " ", info->kind == FETCH_64B ? "64B" : "2x32B");
+    gzprintf(bbvi_file, "%*s\"count\" : %" PRIu64 ",\n", indent+4, " ", info->total);
+    emit_fetch_stats_array(info, true, indent+4, true);
+    emit_fetch_stats_array(info, false, indent+4, false);
+    gzprintf(bbvi_file, "%*s}%s\n", indent, " ", more ? "," : "");
 }
 
 static void plugin_exit(qemu_plugin_id_t id, void *p)
@@ -191,14 +246,46 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
         gzprintf(bbvi_file, "\n    ],\n");
         gzprintf(bbvi_file, "    \"instructions\" : %"PRIu64",\n", total_insns);
 
-        // Pull the top blocks from the entire run and print_hot_blocks
+        // Pull the top blocks from the entire run and emit_hot_blocks
         GList *blocks = NULL;
         g_hash_table_foreach(allblocks, filter_block_final, (gpointer)&blocks);
         blocks = g_list_sort(blocks, cmp_exec_count);
         gzprintf(bbvi_file, "    \"blocks\" : [\n");
-        print_hot_blocks(blocks, hot_count, total_insns, 8);
-        gzprintf(bbvi_file, "    ]\n");
+        emit_hot_blocks(blocks, hot_count, total_insns, 8);
+        bool more = do_fetch_stats;
+        gzprintf(bbvi_file, "    ]%s\n", more ? "," : "");
         g_list_free(blocks);
+
+        if (do_fetch_stats) {
+            uint64_t takens = 0;
+            for (unsigned i =0; i<64; i++) {
+                takens += deltas[i];
+            }
+            gzprintf(bbvi_file, "    \"taken-branches\" : {\n");
+            gzprintf(bbvi_file, "        \"count\" : %" PRIu64 ",\n", takens);
+            gzprintf(bbvi_file, "        \"target-distances\" : [\n");
+            uint64_t cumulative = 0;
+            for (unsigned i = 0; i<64; i++) {
+                cumulative += deltas[i];
+                if (i >= 12) {
+                    gzprintf(bbvi_file, "            { \"common-bits\" : %u, \"cumulative\": %" PRIu64 ", \"pct\": %.2f }%s\n",
+                             i, cumulative, 100.0 * (float)cumulative/takens, cumulative == takens ? "" : ",");
+                }
+                if (cumulative == takens) {
+                    break;
+                }
+            }
+            gzprintf(bbvi_file, "        ]\n");
+            gzprintf(bbvi_file, "    }%s\n", more ? "," : "");
+            more = true;        /* fetch stats follow the taken details */
+
+            gzprintf(bbvi_file, "    \"fetch-stats\" : {\n");
+            for (unsigned i = 0; i < NUM_FETCH_ALGO; i++) {
+                emit_fetch_stats(&finfos[i], 8, i+1<NUM_FETCH_ALGO);
+            }
+            more = false;       /* nothing after these fetch stats */
+            gzprintf(bbvi_file, "    }%s\n", more ? "," : "");
+        }
 
         gzprintf(bbvi_file, "}\n");
         gzclose_w(bbvi_file);
@@ -212,8 +299,127 @@ static void plugin_init(void)
     gzprintf(bbvi_file, "    \"intervals\" : [\n");
 }
 
+static void log_fetch_run(struct fetch_info *info)
+{
+    g_assert(info->insts > 0 && info->bytes > 0);
+    g_assert(info->insts <= BUCKETS && info->bytes/2 <= BUCKETS);
+    info->total++;
+    info->inst_buckets[info->insts-1]++;
+    info->bytes_buckets[info->bytes/2-1]++;
+    //printf("  LOG%u: %u %u\n", info->kind, info->insts, info->bytes);
+    g_assert((info->kind != FETCH_2x32B) || (info->insts > 1));
+    info->bytes = 0;
+    info->insts = 0;
+    info->one_taken = false;
+}
+
+// Not concerned with taken or not taken here; just do as many fetches
+// as it takes to get through the end of the given block.
+static void fetch_loop(struct fetch_info *info, BlockInfo *bb)
+{
+    unsigned left = bb->bytes;
+    unsigned space = 64 - info->bytes;
+    unsigned taken_insts = 0;   /* remember how many insts consumed */
+    unsigned index = 0;         /* track position in off_to_inst[] */
+
+    while (left) {
+        // Take as much as possible as we repeat the loop body
+        unsigned take = left < space ? left : space;
+        index += take/2 - 1;
+        // Deal with straddle case: pull the extra 2B in the fetch
+        if (bb->off_to_inst[index] == 0) {
+            index++;
+            take += 2;
+            g_assert(bb->off_to_inst[index] > 0);
+        }
+        const unsigned new_insts = bb->off_to_inst[index] - taken_insts;
+        //printf(" TAKE%u %u %u @ %u\n", info->kind, new_insts, take, bb->off_to_inst[index]);
+        info->insts += new_insts;
+        info->bytes += take;
+        // Update the progress trackers
+        taken_insts = bb->off_to_inst[index];
+        index++;
+        // If the fetch buffer is full, log the fetch. It's possible
+        // the fetch happened to terminate with a taken branch, but we
+        // don't know that here.
+        if (info->bytes >= 64) {
+            log_fetch_run(info);
+            space = 64;
+        }
+        // Paranoia - sanity-check the math
+        g_assert(take <= left);
+        left -= take;
+        //printf(" LEFT%u -> %u\n", kind, left);
+    }
+}
+
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 {
+    BlockInfo *cnt = NULL;
+    const uint64_t hash = (uint64_t) udata;
+
+    // If we're looking for taken branches, we need info from the
+    // previous basic block, and have to look up this one. Since this
+    // is significant extra work, we don't want to do it unless the
+    // user asked.
+    if (do_fetch_stats) {
+        cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+        //printf("Block @ %012" PRIx64 "\n", cnt->start_addr);
+
+        // First determine if the block we're about to execute is at
+        // the target of a taken branch. This affects all the fetch
+        // stats collection.
+        bool taken = false;
+
+        if (prev_block) {
+            const uint64_t target_pc = hash;
+            const uint64_t fallthrough_pc = prev_block->start_addr + prev_block->bytes;
+            taken = (target_pc != fallthrough_pc);
+            if (taken) {
+                const uint64_t branch_pc = prev_block->last_pc;
+                const uint64_t xor = branch_pc ^ target_pc;
+                const unsigned bits = 64-__builtin_clzl(xor);
+                //printf("  %012" PRIx64 " -> %012" PRIx64 " [%012" PRIx64 "/ %2u]\n",
+                //       branch_pc, target_pc, xor, bits);
+                deltas[bits]++;
+            }
+        }
+
+        prev_block = cnt;
+
+        // If the previous block ended with a taken branch, we may
+        // need to log that fetch group and start a new one.
+        if (taken) {
+            struct fetch_info *info = &finfos[FETCH_64B];
+            // It's possible that looping through the previous block
+            // just happened to already log/flush a taken branch at
+            // the block's end; in that case, we ignore the taken
+            // branch here.
+            if (info->insts) {
+                log_fetch_run(info);
+            }
+
+            // This taken closes the 2x32 fetch group if either it's
+            // the second (one_taken == true) or it's the first and it
+            // occurs at 32B or later.
+            info = &finfos[FETCH_2x32B];
+            if (info->one_taken || info->bytes >= 32) {
+                log_fetch_run(info);
+            } else if (info->insts) {
+                // If the fetch group is still going, note that we
+                // have seen the first taken branch.
+                info->one_taken = true;
+            }
+        }
+
+        // Now consume the rest of this block, logging each completed
+        // fetch group.
+        //printf(" -LOOP-\n");
+        for (unsigned i = 0; i < NUM_FETCH_ALGO; i++) {
+            fetch_loop(&finfos[i], cnt);
+        }
+    }
+
     // The callback has to run for every TB execution so we can detect
     // the end of an interval. Most of the time we just bail
     // immediately. Note that inline operations (counter increment)
@@ -224,9 +430,10 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 
     end_interval();
 
+    if (cnt == NULL) {
+        cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+    }
     // Remember the PC that started each interval
-    const uint64_t hash = (uint64_t) udata;
-    BlockInfo *cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
     intv_start_pc = cnt->start_addr;
 
     // Track drift due to ending intervals on block boundaries. We
@@ -268,6 +475,29 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
       cnt->start_addr = pc;
       cnt->insns = insns;
       g_hash_table_insert(allblocks, (gpointer) hash, (gpointer) cnt);
+      if (do_fetch_stats) {
+          size_t n = qemu_plugin_tb_n_insns(tb);
+          size_t bytes = 0;
+          // Since blocks can be of arbitrary size, dynamically
+          // allocate the off_to_inst array. Have to iterate the
+          // instructions to get the byte size of the block.
+          for (size_t i = 0; i < n; i++) {
+              struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+              cnt->last_pc = pc + bytes;
+              bytes += qemu_plugin_insn_size(insn);
+          }
+          cnt->off_to_inst = g_new0(uint16_t, bytes/2);
+          // Log each instruction start in the offset array. A zero at
+          // any index means (index+1)*2 bytes is in the middle of an
+          // instruction. A non-zero value means that many
+          // instructions are included in the first (index+1)*2 bytes
+          // of the block.
+          for (size_t i = 0; i < n; i++) {
+              struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+              cnt->bytes += qemu_plugin_insn_size(insn);
+              cnt->off_to_inst[cnt->bytes/2-1] = i+1;
+          }
+      }
     }
     g_mutex_unlock(&lock);
 
@@ -302,14 +532,25 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
             if (bbvi_file == Z_NULL) {
                 return -1;
             }
+        } else if (g_strcmp0(tokens[0], "fetch") == 0) {
+            if (!qemu_plugin_bool_parse(tokens[0], tokens[1], &do_fetch_stats)) {
+                fprintf(stderr, "bbvgen: boolean argument parsing failed: %s\n", opt);
+                return -1;
+            }
         } else {
-            fprintf(stderr, "option parsing failed: %s\n", opt);
+            fprintf(stderr, "bbvgen: option parsing failed: %s\n", opt);
             return -1;
         }
     }
 
+    if (do_fetch_stats) {
+        for (unsigned i = 0; i < NUM_FETCH_ALGO; i++) {
+            finfos[i].kind = i;
+        }
+    }
+
     if (bbv_file == Z_NULL && bbvi_file == Z_NULL) {
-        fprintf(stderr, "At least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
+        fprintf(stderr, "bbvgen: at least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
         return -1;
     }
 
