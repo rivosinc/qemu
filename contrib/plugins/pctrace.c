@@ -24,8 +24,7 @@
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static uint64_t insn_count = 0;
-static gzFile outfile;
-static const char *filename = "pctrace.gz";
+static gzFile outfile = Z_NULL;
 
 static GHashTable *dis;
 
@@ -75,12 +74,24 @@ QEMU_PLUGIN_EXPORT
 int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                         int argc, char **argv)
 {
-    if (argc > 0 && argv[0]) {
-      filename = argv[0];
+    for (int i = 0; i < argc; i++) {
+        char *opt = argv[i];
+        g_autofree char **tokens = g_strsplit(opt, "=", 2);
+
+        if (g_strcmp0(tokens[0], "out") == 0) {
+            outfile = gzopen(tokens[1], "wb9");
+            if (outfile == Z_NULL) {
+                return -1;
+            }
+        } else {
+            fprintf(stderr, "option parsing failed: %s\n", opt);
+            return -1;
+        }
     }
-    outfile = gzopen(filename, "wb9");
+
     if (outfile == Z_NULL) {
-      return -1;
+        fprintf(stderr, "A \"out=<path>\" argument must be supplied\n");
+        return -1;
     }
 
     plugin_init();

@@ -47,9 +47,8 @@
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
-static const char *filename = "bbv.gz";
-static gzFile bbv_file;
-static gzFile bbvi_file;
+static gzFile bbv_file = Z_NULL;
+static gzFile bbvi_file = Z_NULL;
 
 static GMutex lock;
 static GHashTable *allblocks;
@@ -289,19 +288,29 @@ QEMU_PLUGIN_EXPORT
 int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                         int argc, char **argv)
 {
-    if (argc > 0 && argv[0]) {
-      filename = argv[0];
+    for (int i = 0; i < argc; i++) {
+        char *opt = argv[i];
+        g_autofree char **tokens = g_strsplit(opt, "=", 2);
+
+        if (g_strcmp0(tokens[0], "bbv") == 0) {
+            bbv_file = gzopen(tokens[1], "wb9");
+            if (bbv_file == Z_NULL) {
+                return -1;
+            }
+        } else if (g_strcmp0(tokens[0], "bbvi") == 0) {
+            bbvi_file = gzopen(tokens[1], "wb9");
+            if (bbvi_file == Z_NULL) {
+                return -1;
+            }
+        } else {
+            fprintf(stderr, "option parsing failed: %s\n", opt);
+            return -1;
+        }
     }
-    bbv_file = gzopen(filename, "wb9");
-    if (bbv_file == Z_NULL) {
-      return -1;
-    }
-    if (argc > 1 && argv[1]) {
-      bbvi_file = gzopen(argv[1], "wb9");
-      if (bbvi_file == Z_NULL) {
-        gzclose_w(bbv_file);
+
+    if (bbv_file == Z_NULL && bbvi_file == Z_NULL) {
+        fprintf(stderr, "At least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
         return -1;
-      }
     }
 
     char *opt = getenv("QEMU_BBV_INTERVAL");
