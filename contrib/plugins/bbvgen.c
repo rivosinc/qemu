@@ -537,6 +537,10 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                 fprintf(stderr, "bbvgen: boolean argument parsing failed: %s\n", opt);
                 return -1;
             }
+        } else if (g_strcmp0(tokens[0], "ilen") == 0) {
+            intv_length = strtoull(tokens[1], NULL, 0);
+        } else if (g_strcmp0(tokens[0], "nblocks") == 0) {
+            hot_count = strtoul(tokens[1], NULL, 0);
         } else {
             fprintf(stderr, "bbvgen: option parsing failed: %s\n", opt);
             return -1;
