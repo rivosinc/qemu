@@ -22,6 +22,7 @@
 #include "qemu/error-report.h"
 #include "qemu.h"
 #include "user-internals.h"
+#include "checkpoint.h"
 #include "cpu_loop-common.h"
 #include "signal-common.h"
 #include "elf.h"
@@ -33,12 +34,19 @@ void cpu_loop(CPURISCVState *env)
     int trapnr, signum, sigcode;
     target_ulong sigaddr;
     target_ulong ret;
+    CkptData ckpt;
+
+    checkpoint_init(cs, &ckpt);
 
     for (;;) {
+        checkpoint_before_exec(&ckpt);
+
         cpu_exec_start(cs);
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
         process_queued_cpu_work(cs);
+
+        checkpoint_after_exec(&ckpt);
 
         signum = 0;
         sigcode = 0;

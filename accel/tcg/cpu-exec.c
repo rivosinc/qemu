@@ -832,6 +832,28 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
         return;
     }
 
+#ifdef CONFIG_USER_ONLY
+    /* RIVOS-KW this happens when a linux-user mode execution is using
+     * the icount mechanism to stop execution at particular
+     * instruction counts. While some icount machinery is being used,
+     * icount isn't actually enabled - so return early, forcing
+     * execution to the outer loop with a phony interrupt.
+     */
+    if (cpu->icount_extra == 0 && qatomic_read(&cpu_neg(cpu)->icount_decr.u32) > 0) {
+        /* When we're directed to stop in the middle of a block,
+         * actually go one further. This is the preferred behavior for
+         * the current RIVOS checkpoint use case.
+         */
+        unsigned more = tb->icount - insns_left;
+        qatomic_set(&cpu_neg(cpu)->icount_decr.u16.low, tb->icount);
+        cpu->icount_budget += more;
+    } else {
+        cpu->exception_index = EXCP_INTERRUPT;
+        cpu_loop_exit(cpu);
+    }
+    return;
+#endif
+
     /* Instruction counter expired.  */
     assert(icount_enabled());
 #ifndef CONFIG_USER_ONLY

@@ -1,6 +1,8 @@
 #ifndef RISCV_TARGET_CPU_H
 #define RISCV_TARGET_CPU_H
 
+#define TARGET_CAN_CHECKPOINT
+
 static inline void cpu_clone_regs_child(CPURISCVState *env, target_ulong newsp,
                                         unsigned flags)
 {

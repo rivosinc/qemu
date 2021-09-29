@@ -54,6 +54,7 @@
 #include "signal-common.h"
 #include "loader.h"
 #include "user-mmap.h"
+#include "checkpoint.h"
 
 #ifndef AT_FLAGS_PRESERVE_ARGV0
 #define AT_FLAGS_PRESERVE_ARGV0_BIT 0
@@ -392,6 +393,16 @@ static void handle_arg_trace(const char *arg)
     trace_opt_parse(arg);
 }
 
+#ifdef TARGET_CAN_CHECKPOINT
+static void handle_arg_checkpoint(const char *arg)
+{
+    if (checkpoint_opt_parse(arg) == false) {
+        fprintf(stderr, "Misformatted checkpoint argument\n");
+        exit(EXIT_FAILURE);
+    }
+}
+#endif
+
 #if defined(TARGET_XTENSA)
 static void handle_arg_abi_call0(const char *arg)
 {
@@ -459,6 +470,10 @@ static const struct qemu_argument arg_table[] = {
      "",           "Seed for pseudo-random number generator"},
     {"trace",      "QEMU_TRACE",       true,  handle_arg_trace,
      "",           "[[enable=]<pattern>][,events=<file>][,file=<file>]"},
+#ifdef TARGET_CAN_CHECKPOINT
+    {"checkpoint", "QEMU_CHECKPOINT",  true,  handle_arg_checkpoint,
+     "",           "<interval-size>,<warmup-len>,<ind>[,<ind>[,...]]"},
+#endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,
      "",           "[file=]<file>[,<argname>=<argvalue>]"},
