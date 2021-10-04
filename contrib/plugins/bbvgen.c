@@ -87,16 +87,27 @@ enum { FETCH_64B, FETCH_2x32B, NUM_FETCH_ALGO };
 
 // Buckets need to cover 1/2/../33 instructions and 2/4/../66 bytes,
 // because of the case where a 4B instruction falls at byte 62.
-#define BUCKETS 33
+#define SIZE_BUCKETS 33
+// There are 2 special buckets to cover distances within a cacheline,
+// and all distances at or above the split bit.
+#define SPLIT_BIT 15
+#define INDEX_BIT 6
+#define DIST_BUCKETS (2 + SPLIT_BIT - INDEX_BIT)
+#define F_BUCKETS 0
+#define B_BUCKETS 1
 
 struct fetch_info {
     uint64_t total;
     uint32_t insts;
     uint32_t bytes;
-    uint64_t inst_buckets[BUCKETS];
-    uint64_t bytes_buckets[BUCKETS];
-    bool one_taken;
+    uint64_t inst_buckets[SIZE_BUCKETS];
+    uint64_t bytes_buckets[SIZE_BUCKETS];
     uint8_t  kind;
+    // The rest of the fields apply only to 2x32B:
+    bool one_taken;
+    uint64_t took_one;
+    uint64_t first_addr;
+    uint64_t distance_buckets[2][DIST_BUCKETS];
 };
 static struct fetch_info finfos[NUM_FETCH_ALGO];
 
@@ -212,27 +223,49 @@ static void end_interval(void)
 static void emit_fetch_stats_array(struct fetch_info *info, bool insts, unsigned indent, bool more)
 {
     gzprintf(bbvi_file, "%*s\"%s-distr\" : [\n", indent, " ", insts ? "inst" : "bytes");
-    for (unsigned i = 0; i < BUCKETS; i++) {
-        const bool last = (i == BUCKETS-1);
+    for (unsigned i = 0; i < SIZE_BUCKETS; i++) {
+        const bool last = (i == SIZE_BUCKETS-1);
         if (insts) {
             gzprintf(bbvi_file, "%*s{ \"value\" : %u, \"count\" : %" PRIu64 ", \"pct\" : %.2f }%s\n",
-                     indent+4, " ", i+1, info->inst_buckets[i], last ? "" : ",",
-                     100.0 * (double)info->inst_buckets[i]/info->total);
+                     indent+4, " ", i+1, info->inst_buckets[i],
+                     100.0 * (double)info->inst_buckets[i]/info->total,
+                     last ? "" : ",");
         } else {
             gzprintf(bbvi_file, "%*s{ \"value\" : %u, \"count\" : %" PRIu64 ", \"pct\" : %.2f }%s\n",
-                     indent+4, " ", (i+1) * 2, info->bytes_buckets[i], last ? "" : ",",
-                     100.0 * (double)info->bytes_buckets[i]/info->total);
+                     indent+4, " ", (i+1) * 2, info->bytes_buckets[i],
+                     100.0 * (double)info->bytes_buckets[i]/info->total,
+                     last ? "" : ",");
         }
+    }
+    gzprintf(bbvi_file, "%*s]%s\n", indent, " ", more ? "," : "");
+}
+
+static void emit_distance_array(struct fetch_info *info, unsigned indent, unsigned index,
+                                const char *label, bool more)
+{
+    gzprintf(bbvi_file, "%*s\"%s-distance\" : [\n", indent, " ", label);
+    for (unsigned i = 0; i < DIST_BUCKETS; i++) {
+        const bool last = (i == DIST_BUCKETS-1);
+        gzprintf(bbvi_file, "%*s{ \"value\" : %u, \"count\" : %" PRIu64 ", \"pct\" : %.2f }%s\n",
+                 indent+4, " ", i, info->distance_buckets[index][i],
+                 100.0 * (double)info->distance_buckets[index][i]/info->took_one,
+                 last ? "" : ",");
     }
     gzprintf(bbvi_file, "%*s]%s\n", indent, " ", more ? "," : "");
 }
 
 static void emit_fetch_stats(struct fetch_info *info, unsigned indent, bool more)
 {
+    const bool two_taken = (info->kind == FETCH_2x32B);
     gzprintf(bbvi_file, "%*s\"%s\" : {\n", indent, " ", info->kind == FETCH_64B ? "64B" : "2x32B");
     gzprintf(bbvi_file, "%*s\"count\" : %" PRIu64 ",\n", indent+4, " ", info->total);
     emit_fetch_stats_array(info, true, indent+4, true);
-    emit_fetch_stats_array(info, false, indent+4, false);
+    emit_fetch_stats_array(info, false, indent+4, two_taken);
+    if (two_taken) {
+        gzprintf(bbvi_file, "%*s\"two-taken\" : %" PRIu64 ",\n", indent+4, " ", info->took_one);
+        emit_distance_array(info, indent+4, F_BUCKETS, "fetch", true);
+        emit_distance_array(info, indent+4, B_BUCKETS, "branch", false);
+    }
     gzprintf(bbvi_file, "%*s}%s\n", indent, " ", more ? "," : "");
 }
 
@@ -302,7 +335,7 @@ static void plugin_init(void)
 static void log_fetch_run(struct fetch_info *info)
 {
     g_assert(info->insts > 0 && info->bytes > 0);
-    g_assert(info->insts <= BUCKETS && info->bytes/2 <= BUCKETS);
+    g_assert(info->insts <= SIZE_BUCKETS && info->bytes/2 <= SIZE_BUCKETS);
     info->total++;
     info->inst_buckets[info->insts-1]++;
     info->bytes_buckets[info->bytes/2-1]++;
@@ -322,6 +355,11 @@ static void fetch_loop(struct fetch_info *info, BlockInfo *bb)
     unsigned taken_insts = 0;   /* remember how many insts consumed */
     unsigned index = 0;         /* track position in off_to_inst[] */
 
+    if ((info->kind == FETCH_2x32B) && (info->bytes == 0)) {
+        // If a new fetch group is starting, make a note of the
+        // starting PC.
+        info->first_addr = bb->start_addr;
+    }
     while (left) {
         // Take as much as possible as we repeat the loop body
         unsigned take = left < space ? left : space;
@@ -344,12 +382,34 @@ static void fetch_loop(struct fetch_info *info, BlockInfo *bb)
         // don't know that here.
         if (info->bytes >= 64) {
             log_fetch_run(info);
+            if (info->kind == FETCH_2x32B) {
+                // Track progress through a large block. If the block
+                // ends in a taken branch, the actual next fetch PC
+                // will get fixed up before it's used in the two-taken
+                // distance histogram code.
+                info->first_addr = bb->start_addr + take;
+            }
             space = 64;
         }
         // Paranoia - sanity-check the math
         g_assert(take <= left);
         left -= take;
         //printf(" LEFT%u -> %u\n", kind, left);
+    }
+}
+
+static unsigned distance_bucket(uint64_t first, uint64_t second)
+{
+    const uint64_t xor = first ^ second;
+    const unsigned bit = 63-__builtin_clzl(xor);
+    // Everything at or above the SPLIT_BIT go into the "SPLIT_BIT"
+    // bucket, while everything below INDEX_BIT goes into bucket 0.
+    if (bit < INDEX_BIT) {
+        return 0;
+    } else if (bit >= SPLIT_BIT) {
+        return (SPLIT_BIT - INDEX_BIT) + 1;
+    } else {
+        return (bit - INDEX_BIT) + 1;
     }
 }
 
@@ -372,7 +432,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
         bool taken = false;
 
         if (prev_block) {
-            const uint64_t target_pc = hash;
+            const uint64_t target_pc = cnt->start_addr;
             const uint64_t fallthrough_pc = prev_block->start_addr + prev_block->bytes;
             taken = (target_pc != fallthrough_pc);
             if (taken) {
@@ -384,8 +444,6 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
                 deltas[bits]++;
             }
         }
-
-        prev_block = cnt;
 
         // If the previous block ended with a taken branch, we may
         // need to log that fetch group and start a new one.
@@ -409,8 +467,17 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
                 // If the fetch group is still going, note that we
                 // have seen the first taken branch.
                 info->one_taken = true;
+                info->took_one++;
+                const uint64_t target_pc = cnt->start_addr;
+                const uint64_t branch_pc = prev_block->last_pc;
+                unsigned bucket = distance_bucket(info->first_addr, target_pc);
+                info->distance_buckets[F_BUCKETS][bucket]++;
+                bucket = distance_bucket(branch_pc, target_pc);
+                info->distance_buckets[B_BUCKETS][bucket]++;
             }
         }
+
+        prev_block = cnt;
 
         // Now consume the rest of this block, logging each completed
         // fetch group.
