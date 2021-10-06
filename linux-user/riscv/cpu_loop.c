@@ -26,6 +26,8 @@
 #include "cpu_loop-common.h"
 #include "signal-common.h"
 #include "elf.h"
+#include "loader.h"
+#include "user-mmap.h"
 #include "semihosting/common-semi.h"
 
 void cpu_loop(CPURISCVState *env)
@@ -150,4 +152,34 @@ void target_cpu_copy_regs(CPUArchState *env, struct target_pt_regs *regs)
     ts->heap_base = info->brk;
     /* This will be filled in on the first SYS_HEAPINFO call.  */
     ts->heap_limit = 0;
+}
+
+void target_cpu_checkpoint(CkptData *cd)
+{
+    CPUState *cs = cd->cs;
+    CPUArchState *env = cs->env_ptr;
+    TaskState *ts = cs->opaque;
+    struct image_info *info = ts->info;
+
+    fprintf(cd->info, "    \"cpu\" : {\n");
+    fprintf(cd->info, "        \"instructions\" : %lu,\n", cd->total_instructions);
+    fprintf(cd->info, "        \"pc\" : " TARGET_FMT_lu ",\n", env->pc);
+    fprintf(cd->info, "        \"brk\" : " TARGET_FMT_lu ",\n", do_brk(0));
+    fprintf(cd->info, "        \"mmap\" : " TARGET_FMT_lu ",\n", mmap_next_start);
+    fprintf(cd->info, "        \"stack\" : { \"start\" : " TARGET_FMT_lu ", \"end\" : %lu },\n",
+            info->stack_limit, info->stack_limit+guest_stack_size-1);
+    fprintf(cd->info, "        \"gprs\" : [");
+    for (unsigned gpr = 0; gpr < 32; gpr++) {
+        fprintf(cd->info, " " TARGET_FMT_lu "%s", env->gpr[gpr], gpr+1 == 32 ? "" : ",");
+    }
+    fprintf(cd->info, " ],\n");
+    fprintf(cd->info, "        \"fprs\" : [");
+    for (unsigned fpr = 0; fpr < 32; fpr++) {
+        fprintf(cd->info, " %lu%s", env->fpr[fpr], fpr+1 == 32 ? "" : ",");
+    }
+    fprintf(cd->info, " ],\n");
+    fprintf(cd->info, "        \"vrs\" : [");
+    // TODO: add any CSRs that become necessary for user-mode checkpoints
+    fprintf(cd->info, " ]\n");
+    fprintf(cd->info, "    },\n");
 }

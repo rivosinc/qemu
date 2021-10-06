@@ -401,6 +401,10 @@ static void handle_arg_checkpoint(const char *arg)
         exit(EXIT_FAILURE);
     }
 }
+static void handle_arg_checkpoint_dir(const char *arg)
+{
+    checkpoint_set_dir(arg);
+}
 #endif
 
 #if defined(TARGET_XTENSA)
@@ -473,6 +477,8 @@ static const struct qemu_argument arg_table[] = {
 #ifdef TARGET_CAN_CHECKPOINT
     {"checkpoint", "QEMU_CHECKPOINT",  true,  handle_arg_checkpoint,
      "",           "<interval-size>,<warmup-len>,<ind>[,<ind>[,...]]"},
+    {"checkpoint-dir", "QEMU_CHECKPOINT_DIR", true, handle_arg_checkpoint_dir,
+     "",           "Path to the desired checkpoint directory (default \"./checkpoints\")"},
 #endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,

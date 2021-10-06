@@ -9,6 +9,8 @@
 #define LINUX_USER_CHECKPOINT_H
 
 #include "qemu/osdep.h"
+#include "qemu.h"
+#include "user-internals.h"
 
 typedef struct CkptData {
     uint64_t total_instructions;
@@ -16,11 +18,21 @@ typedef struct CkptData {
     uint32_t stop_index;
     bool stopping;
     CPUState *cs;
+    int dir;
+    FILE *pmem;
+    FILE *info;
+    uint64_t pos;
 } CkptData;
 
 bool checkpoint_opt_parse(const char *arg);
+void checkpoint_set_dir(const char *arg);
+
 void checkpoint_init(CPUState *cs, CkptData *cd);
 void checkpoint_before_exec(CkptData *cd);
 void checkpoint_after_exec(CkptData *cd);
+
+#ifdef TARGET_CAN_CHECKPOINT
+extern void target_cpu_checkpoint(CkptData *cd);
+#endif
 
 #endif

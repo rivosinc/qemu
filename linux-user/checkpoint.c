@@ -7,13 +7,15 @@
 
 #include "checkpoint.h"
 
-#include "qemu.h"
-#include "user-internals.h"
-
 static uint64_t interval_size = 0;
 static uint64_t warmup_size = 0;
 static unsigned long *stop_targets = NULL;
 static unsigned int num_stop_targets = 0;
+static const char *cptdir = "checkpoints";
+
+#ifdef TARGET_CAN_CHECKPOINT
+static void checkpoint_emit(CkptData *cd);
+#endif
 
 bool checkpoint_opt_parse(const char *arg)
 {
@@ -63,6 +65,11 @@ bool checkpoint_opt_parse(const char *arg)
     return true;
 }
 
+void checkpoint_set_dir(const char *arg)
+{
+    cptdir = strdup(arg);
+}
+
 static void update_for_stop_index(CPUState *cs, CkptData *cd)
 {
     cd->stopping = cd->stop_index < num_stop_targets;
@@ -99,6 +106,14 @@ void checkpoint_init(CPUState *cs, CkptData *cd)
         cs->tcg_cflags = CF_USE_ICOUNT;
     }
 #endif
+
+    if (cd->stopping) {
+        if (mkdir(cptdir, 0775) == -1) {
+            perror("checkpoint mkdir");
+            exit(EXIT_FAILURE);
+        }
+        cd->dir = open(cptdir, O_DIRECTORY);
+    }
 }
 
 void checkpoint_before_exec(CkptData *cd)
@@ -124,7 +139,10 @@ void checkpoint_after_exec(CkptData *cd)
     //printf("Back to loop %lu %d %ld\n", cs->icount_budget, cpu_neg(cs)->icount_decr.u16.low, cs->icount_extra);
     uint64_t executed = (cs->icount_budget - (cpu_neg(cs)->icount_decr.u16.low + cs->icount_extra));
     if (executed == 0) {
-        fprintf(stderr, "== checkpoint @ %" PRIu64 " ==\n", cd->target_inst);
+#ifdef TARGET_CAN_CHECKPOINT
+        checkpoint_emit(cd);
+#endif
+
         cd->stop_index++;
         update_for_stop_index(cs, cd);
     } else {
@@ -132,3 +150,142 @@ void checkpoint_after_exec(CkptData *cd)
         cd->total_instructions += executed;
     }
 }
+
+#ifdef TARGET_CAN_CHECKPOINT
+
+static int ckpt_vma_walker(void *priv, target_ulong start, target_ulong end,
+                           unsigned long flags)
+{
+    CkptData *cd = (CkptData *)priv;
+    const char *name = "heap";
+
+    if (!(flags & PROT_READ)) {
+        return 0;
+    }
+
+    CPUState *cs = cd->cs;
+    TaskState *ts = cs->opaque;
+    struct image_info *info = ts->info;
+    if (start == info->stack_limit) {
+        name = "stack";
+    }
+
+    uint64_t offset = cd->pos;
+    if (offset > 0) {
+        fprintf(cd->info, ",\n");
+    }
+    abi_ulong addr;
+    for (addr = start; addr < end; addr += TARGET_PAGE_SIZE) {
+        char page[TARGET_PAGE_SIZE];
+        int error;
+
+        error = copy_from_user(page, addr, sizeof (page));
+        if (error != 0) {
+            fprintf(stderr, "failed to read a page, " TARGET_FMT_lx "\n", addr);
+            return -1;
+        } else {
+            fwrite(page, sizeof(page), 1, cd->pmem);
+            cd->pos += sizeof(page);
+        }
+    }
+
+    fprintf(cd->info,
+            "        { \"vaddr\" : " TARGET_FMT_lu ", \"end\" : " TARGET_FMT_lu ", \"paddr\" : %" PRIu64 ", \"name\" : \"%s\" }",
+            start, end, offset, name);
+    return 0;
+}
+
+static void checkpoint_emit(CkptData *cd)
+{
+    int cdirfd, fd, dfd;
+    char *dirname, *filename;
+    DIR *d;
+    struct dirent *dent;
+    unsigned files = 0;
+
+    fprintf(stderr, "== checkpoint @ %" PRIu64 " ==\n", cd->target_inst);
+
+    // Put this checkpoint's data in a new subdir of cd->dir
+    dirname = g_strdup_printf("cpt.%ld", cd->target_inst);
+    mkdirat(cd->dir, dirname, 0775);
+    cdirfd = openat(cd->dir, dirname, O_DIRECTORY);
+    g_free(dirname);
+
+    // Start the JSON-formatted 'info' file
+    filename = g_strdup_printf("qemu_%ld.json", cd->target_inst);
+    fd = openat(cdirfd, filename, O_CREAT|O_TRUNC|O_WRONLY, 0664);
+    cd->info = fdopen(fd, "w");
+    fprintf(cd->info, "{\n");
+    g_free(filename);
+
+    // Write out the physical memory
+    filename = g_strdup_printf("qemu_%ld.pmem", cd->target_inst);
+    fd = openat(cdirfd, filename, O_CREAT|O_TRUNC|O_WRONLY, 0664);
+    cd->pmem = fdopen(fd, "w");
+    cd->pos = 0;
+    fprintf(cd->info,
+            "    \"params\" : { \"interval\" : %lu, \"size\" : %lu, \"warmup\" : %lu },\n",
+            stop_targets[cd->stop_index], interval_size, warmup_size);
+    fprintf(cd->info, "    \"pmem\" : \"%s\",\n", filename);
+    fprintf(cd->info, "    \"regions\" : [\n");
+    walk_memory_regions(cd, ckpt_vma_walker);
+    fprintf(cd->info, "\n    ],\n");
+    fclose(cd->pmem);
+    g_free(filename);
+    close(cdirfd);
+
+    // For now, the target cpu routine will write to cd->info
+    target_cpu_checkpoint(cd);
+
+    // Since we can rely on Linux hosting, use the /proc filesystem to
+    // identify the interesting file descriptors to checkpoint.
+    d = opendir("/proc/self/fd");
+    dfd = dirfd(d);
+    fprintf(cd->info, "    \"files\" : [\n");
+    while ((dent = readdir(d)) != NULL) {
+        if (dent->d_type == DT_LNK) {
+            char buf[1024];
+            ssize_t len = readlinkat(dfd, dent->d_name, buf, sizeof(buf));
+            buf[len] = 0;
+            if (!strncmp("/proc", buf, 5) || !strncmp("/dev", buf, 4)) {
+                continue;
+            }
+            // skip the json fd and checkpoint dir fd
+            unsigned long tgt_fd = strtoul(dent->d_name, NULL, 10);
+            if (tgt_fd == fileno(cd->info) || tgt_fd == cd->dir) {
+                continue;
+            }
+            int flags = fcntl(tgt_fd, F_GETFL, NULL);
+            if (flags == -1) {
+                fprintf(stderr, "WARNING: checkpoint failed to get flags for fd%lu\n", tgt_fd);
+                exit(EXIT_FAILURE);
+            }
+            off_t pos = lseek(tgt_fd, 0, SEEK_CUR);
+            if (pos == (off_t)-1) {
+                fprintf(stderr, "WARNING: checkpoint failed on lseek() for fd%lu\n", tgt_fd);
+                exit(EXIT_FAILURE);
+            }
+            struct stat st;
+            if (fstat(tgt_fd, &st) == -1) {
+                fprintf(stderr, "WARNING: checkpoint failed on stat() for fd%lu\n", tgt_fd);
+                exit(EXIT_FAILURE);
+            }
+            if (files++) {
+                fprintf(cd->info, ",\n");
+            }
+            fprintf(cd->info,
+                    "        { \"fd\" : %lu, \"path\" : \"%s\", \"pos\" : %lu, \"flags\" : %u, \"mode\" : %u }",
+                    tgt_fd, buf, pos, flags, st.st_mode & 0777);
+        }
+    }
+    if (files) {
+        fprintf(cd->info, "\n");
+    }
+    fprintf(cd->info, "    ]\n");
+    closedir(d);
+
+    fprintf(cd->info, "}\n");
+    fclose(cd->info);
+}
+
+#endif
