@@ -178,8 +178,9 @@ void target_cpu_checkpoint(CkptData *cd)
         fprintf(cd->info, " %lu%s", env->fpr[fpr], fpr+1 == 32 ? "" : ",");
     }
     fprintf(cd->info, " ],\n");
+    // TODO: vector registers
     fprintf(cd->info, "        \"vrs\" : [");
-    // TODO: add any CSRs that become necessary for user-mode checkpoints
     fprintf(cd->info, " ]\n");
+    // TODO: add any CSRs that become necessary for user-mode checkpoints
     fprintf(cd->info, "    },\n");
 }

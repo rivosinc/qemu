@@ -7,6 +7,8 @@
 
 #include "checkpoint.h"
 
+#define CKPT_FMT_VERSION 0x0001 /* version 0.1 */
+
 static uint64_t interval_size = 0;
 static uint64_t warmup_size = 0;
 static unsigned long *stop_targets = NULL;
@@ -203,29 +205,46 @@ static void checkpoint_emit(CkptData *cd)
     struct dirent *dent;
     unsigned files = 0;
 
-    fprintf(stderr, "== checkpoint @ %" PRIu64 " ==\n", cd->target_inst);
+    //fprintf(stderr, "== checkpoint @ %" PRIu64 " ==\n", cd->target_inst);
 
     // Put this checkpoint's data in a new subdir of cd->dir
     dirname = g_strdup_printf("cpt.%ld", cd->target_inst);
-    mkdirat(cd->dir, dirname, 0775);
+    if (mkdirat(cd->dir, dirname, 0775) == -1) {
+        perror("checkpoint subdir mkdir");
+        exit(EXIT_FAILURE);
+    }
     cdirfd = openat(cd->dir, dirname, O_DIRECTORY);
+    if (cdirfd == -1) {
+        perror("checkpoint dir open");
+        exit(EXIT_FAILURE);
+    }
     g_free(dirname);
 
     // Start the JSON-formatted 'info' file
     filename = g_strdup_printf("qemu_%ld.json", cd->target_inst);
     fd = openat(cdirfd, filename, O_CREAT|O_TRUNC|O_WRONLY, 0664);
+    if (fd == -1) {
+        perror("checkpoint json open");
+        exit(EXIT_FAILURE);
+    }
     cd->info = fdopen(fd, "w");
     fprintf(cd->info, "{\n");
     g_free(filename);
 
-    // Write out the physical memory
-    filename = g_strdup_printf("qemu_%ld.pmem", cd->target_inst);
-    fd = openat(cdirfd, filename, O_CREAT|O_TRUNC|O_WRONLY, 0664);
-    cd->pmem = fdopen(fd, "w");
-    cd->pos = 0;
+    fprintf(cd->info, "    \"version\" : %u,\n", CKPT_FMT_VERSION);
     fprintf(cd->info,
             "    \"params\" : { \"interval\" : %lu, \"size\" : %lu, \"warmup\" : %lu },\n",
             stop_targets[cd->stop_index], interval_size, warmup_size);
+
+    // Write out the physical memory and the VM region details
+    filename = g_strdup_printf("qemu_%ld.pmem", cd->target_inst);
+    fd = openat(cdirfd, filename, O_CREAT|O_TRUNC|O_WRONLY, 0664);
+    if (fd == -1) {
+        perror("checkpoint pmem open");
+        exit(EXIT_FAILURE);
+    }
+    cd->pmem = fdopen(fd, "w");
+    cd->pos = 0;
     fprintf(cd->info, "    \"pmem\" : \"%s\",\n", filename);
     fprintf(cd->info, "    \"regions\" : [\n");
     walk_memory_regions(cd, ckpt_vma_walker);
@@ -240,12 +259,20 @@ static void checkpoint_emit(CkptData *cd)
     // Since we can rely on Linux hosting, use the /proc filesystem to
     // identify the interesting file descriptors to checkpoint.
     d = opendir("/proc/self/fd");
+    if (d == NULL) {
+        perror("open /proc/self/fd");
+        exit(EXIT_FAILURE);
+    }
     dfd = dirfd(d);
     fprintf(cd->info, "    \"files\" : [\n");
     while ((dent = readdir(d)) != NULL) {
         if (dent->d_type == DT_LNK) {
             char buf[1024];
             ssize_t len = readlinkat(dfd, dent->d_name, buf, sizeof(buf));
+            if (len == (ssize_t)-1) {
+                fprintf(stderr, "ERROR: checkpoint failed to follow fd link %s\n", dent->d_name);
+                exit(EXIT_FAILURE);
+            }
             buf[len] = 0;
             if (!strncmp("/proc", buf, 5) || !strncmp("/dev", buf, 4)) {
                 continue;
@@ -257,17 +284,17 @@ static void checkpoint_emit(CkptData *cd)
             }
             int flags = fcntl(tgt_fd, F_GETFL, NULL);
             if (flags == -1) {
-                fprintf(stderr, "WARNING: checkpoint failed to get flags for fd%lu\n", tgt_fd);
+                fprintf(stderr, "ERROR: checkpoint failed to get flags for fd%lu\n", tgt_fd);
                 exit(EXIT_FAILURE);
             }
             off_t pos = lseek(tgt_fd, 0, SEEK_CUR);
             if (pos == (off_t)-1) {
-                fprintf(stderr, "WARNING: checkpoint failed on lseek() for fd%lu\n", tgt_fd);
+                fprintf(stderr, "ERROR: checkpoint failed on lseek() for fd%lu\n", tgt_fd);
                 exit(EXIT_FAILURE);
             }
             struct stat st;
             if (fstat(tgt_fd, &st) == -1) {
-                fprintf(stderr, "WARNING: checkpoint failed on stat() for fd%lu\n", tgt_fd);
+                fprintf(stderr, "ERROR: checkpoint failed on stat() for fd%lu\n", tgt_fd);
                 exit(EXIT_FAILURE);
             }
             if (files++) {
