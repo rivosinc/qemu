@@ -215,7 +215,7 @@ static void checkpoint_emit(CkptData *cd)
     }
     cdirfd = openat(cd->dir, dirname, O_DIRECTORY);
     if (cdirfd == -1) {
-        perror("checkpoint dir open");
+        perror("checkpoint subdir open");
         exit(EXIT_FAILURE);
     }
     g_free(dirname);
