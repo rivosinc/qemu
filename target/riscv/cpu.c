@@ -163,6 +163,18 @@ static void rv64_base_cpu_init(Object *obj)
     set_misa(env, RV64);
 }
 
+static void rv64_rivos_sentinel_cpu_init(Object *obj)
+{
+    CPURISCVState *env = &RISCV_CPU(obj)->env;
+    set_misa(env, RV64 | RVI | RVM | RVA | RVF | RVD | RVC | RVV | RVH | RVS | RVU);
+    set_priv_version(env, PRIV_VERSION_1_11_0);
+    /* Currently supported bitmanip extensions */
+    qdev_prop_set_bit(DEVICE(obj), "x-zba", true);
+    qdev_prop_set_bit(DEVICE(obj), "x-zbb", true);
+    qdev_prop_set_bit(DEVICE(obj), "x-zbc", true);
+    qdev_prop_set_bit(DEVICE(obj), "x-zbs", true);
+}
+
 static void rv64_sifive_u_cpu_init(Object *obj)
 {
     CPURISCVState *env = &RISCV_CPU(obj)->env;
@@ -769,6 +781,7 @@ static const TypeInfo riscv_cpu_type_infos[] = {
     DEFINE_CPU(TYPE_RISCV_CPU_SIFIVE_U34,       rv32_sifive_u_cpu_init),
 #elif defined(TARGET_RISCV64)
     DEFINE_CPU(TYPE_RISCV_CPU_BASE64,           rv64_base_cpu_init),
+    DEFINE_CPU(TYPE_RISCV_CPU_RIVOS_SENTINEL,   rv64_rivos_sentinel_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_SIFIVE_E51,       rv64_sifive_e_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_SIFIVE_U54,       rv64_sifive_u_cpu_init),
     DEFINE_CPU(TYPE_RISCV_CPU_SHAKTI_C,         rv64_sifive_u_cpu_init),
