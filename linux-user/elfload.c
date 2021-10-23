@@ -901,7 +901,7 @@ static void elf_core_copy_regs(target_elf_gregset_t *regs, const CPUPPCState *en
     (*regs)[33] = tswapreg(env->msr);
     (*regs)[35] = tswapreg(env->ctr);
     (*regs)[36] = tswapreg(env->lr);
-    (*regs)[37] = tswapreg(env->xer);
+    (*regs)[37] = tswapreg(cpu_read_xer(env));
 
     for (i = 0; i < ARRAY_SIZE(env->crf); i++) {
         ccr |= env->crf[i] << (32 - ((i + 1) * 4));
@@ -1448,7 +1448,7 @@ static uint32_t get_elf_hwcap(void)
     uint32_t mask = MISA_BIT('I') | MISA_BIT('M') | MISA_BIT('A')
                     | MISA_BIT('F') | MISA_BIT('D') | MISA_BIT('C');
 
-    return cpu->env.misa & mask;
+    return cpu->env.misa_ext & mask;
 #undef MISA_BIT
 }
 
