@@ -20,7 +20,10 @@ docker-build:
         tag=":$CI_COMMIT_REF_SLUG"
         echo "Running on branch '$CI_COMMIT_BRANCH': tag = $tag"
       fi
-    - docker build --pull -f Containerfile -t "$CI_REGISTRY_IMAGE${tag}" .
+    - >
+      docker build --pull \
+                   --label "com.rivosinc.ba.gitlab.$CI_PROJECT_PATH_SLUG=$CI_COMMIT_SHA" \
+                   -f Containerfile -t "$CI_REGISTRY_IMAGE${tag}" .
     - docker push "$CI_REGISTRY_IMAGE${tag}"
   # Run this job in a branch where a Containerfile exists
   rules:
