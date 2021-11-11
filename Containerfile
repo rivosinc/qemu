@@ -25,7 +25,7 @@ COPY . /src
 
 WORKDIR /tmp/build
 RUN /src/configure --prefix=/rivos/qemu \
-                   --target-list=riscv32-softmmu,riscv64-softmmu,riscv32-linux-user,riscv64-linux-user,x86_64-linux-user \
+                   --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu,riscv32-linux-user,riscv64-linux-user,x86_64-linux-user,aarch64-linux-user \
                    --enable-plugins && \
     make -j && \
     make plugins && \
