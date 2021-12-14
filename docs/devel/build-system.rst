@@ -47,14 +47,14 @@ command line options for which a same-named Meson option exists;
 dashes in the command line are replaced with underscores.
 
 Many checks on the compilation environment are still found in configure
-rather than `meson.build`, but new checks should be added directly to
-`meson.build`.
+rather than ``meson.build``, but new checks should be added directly to
+``meson.build``.
 
 Patches are also welcome to move existing checks from the configure
-phase to `meson.build`.  When doing so, ensure that `meson.build` does
-not use anymore the keys that you have removed from `config-host.mak`.
-Typically these will be replaced in `meson.build` by boolean variables,
-``get_option('optname')`` invocations, or `dep.found()` expressions.
+phase to ``meson.build``.  When doing so, ensure that ``meson.build`` does
+not use anymore the keys that you have removed from ``config-host.mak``.
+Typically these will be replaced in ``meson.build`` by boolean variables,
+``get_option('optname')`` invocations, or ``dep.found()`` expressions.
 In general, the remaining checks have little or no interdependencies,
 so they can be moved one by one.
 
@@ -121,11 +121,11 @@ process for:
 
 1) executables, which include:
 
-   - Tools - qemu-img, qemu-nbd, qga (guest agent), etc
+   - Tools - ``qemu-img``, ``qemu-nbd``, ``qga`` (guest agent), etc
 
-   - System emulators - qemu-system-$ARCH
+   - System emulators - ``qemu-system-$ARCH``
 
-   - Userspace emulators - qemu-$ARCH
+   - Userspace emulators - ``qemu-$ARCH``
 
    - Unit tests
 
@@ -298,7 +298,7 @@ comprises the following tasks:
 
  - Add code to perform the actual feature check.
 
- - Add code to include the feature status in `config-host.h`
+ - Add code to include the feature status in ``config-host.h``
 
  - Add code to print out the feature status in the configure summary
    upon completion.
@@ -334,7 +334,7 @@ The other supporting code is generally simple::
 
 For the configure script to parse the new option, the
 ``scripts/meson-buildoptions.sh`` file must be up-to-date; ``make
-update-buildoptions`` (or just `make`) will take care of updating it.
+update-buildoptions`` (or just ``make``) will take care of updating it.
 
 
 Support scripts
@@ -416,7 +416,7 @@ number of dynamically created files listed later.
 
 ``tests/Makefile.include``
   Rules for external test harnesses. These include the TCG tests,
-  ``qemu-iotests`` and the Avocado-based acceptance tests.
+  ``qemu-iotests`` and the Avocado-based integration tests.
 
 ``tests/docker/Makefile.include``
   Rules for Docker tests. Like tests/Makefile, this file is included
@@ -464,11 +464,10 @@ Built by Meson:
   scripts/make_device_config.sh program, feeding it the
   default-configs/$TARGET-NAME file as input.
 
-``config-host.h``, ``$TARGET-NAME/config-target.h``, ``$TARGET-NAME/config-devices.h``
-  These files are used by source code to determine what features
-  are enabled.  They are generated from the contents of the corresponding
-  ``*.h`` files using the scripts/create_config program. This extracts
-  relevant variables and formats them as C preprocessor macros.
+``config-host.h``, ``$TARGET_NAME-config-target.h``, ``$TARGET_NAME-config-devices.h``
+  These files are used by source code to determine what features are
+  enabled.  They are generated from the contents of the corresponding
+  ``*.mak`` files using Meson's ``configure_file()`` function.
 
 ``build.ninja``
   The build rules.

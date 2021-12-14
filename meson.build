@@ -55,10 +55,16 @@ have_block = have_system or have_tools
 python = import('python').find_installation()
 
 supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux']
-supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
+supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv', 'x86', 'x86_64',
   'arm', 'aarch64', 'mips', 'mips64', 'sparc', 'sparc64']
 
 cpu = host_machine.cpu_family()
+
+# Unify riscv* to a single family.
+if cpu in ['riscv32', 'riscv64']
+  cpu = 'riscv'
+endif
+
 targetos = host_machine.system()
 
 if cpu in ['x86', 'x86_64']
@@ -75,7 +81,7 @@ else
   kvm_targets = []
 endif
 
-kvm_targets_c = ''
+kvm_targets_c = '""'
 if not get_option('kvm').disabled() and targetos == 'linux'
   kvm_targets_c = '"' + '" ,"'.join(kvm_targets) + '"'
 endif
@@ -197,6 +203,10 @@ add_project_arguments('-iquote', '.',
 link_language = meson.get_external_property('link_language', 'cpp')
 if link_language == 'cpp'
   add_languages('cpp', required: true, native: false)
+  cxx = meson.get_compiler('cpp')
+  linker = cxx
+else
+  linker = cc
 endif
 if host_machine.system() == 'darwin'
   add_languages('objc', required: false, native: false)
@@ -319,9 +329,7 @@ if not get_option('hax').disabled()
   endif
 endif
 if targetos == 'netbsd'
-  if cc.has_header_symbol('nvmm.h', 'nvmm_cpu_stop', required: get_option('nvmm'))
-    nvmm = cc.find_library('nvmm', required: get_option('nvmm'))
-  endif
+  nvmm = cc.find_library('nvmm', required: get_option('nvmm'))
   if nvmm.found()
     accelerators += 'CONFIG_NVMM'
   endif
@@ -331,12 +339,12 @@ tcg_arch = config_host['ARCH']
 if not get_option('tcg').disabled()
   if cpu not in supported_cpus
     if get_option('tcg_interpreter')
-      warning('Unsupported CPU @0@, will use TCG with TCI (experimental and slow)'.format(cpu))
+      warning('Unsupported CPU @0@, will use TCG with TCI (slow)'.format(cpu))
     else
       error('Unsupported CPU @0@, try --enable-tcg-interpreter'.format(cpu))
     endif
   elif get_option('tcg_interpreter')
-    warning('Use of the TCG interpretor is not recommended on this host')
+    warning('Use of the TCG interpreter is not recommended on this host')
     warning('architecture. There is a native TCG execution backend available')
     warning('which provides substantially better performance and reliability.')
     warning('It is strongly recommended to remove the --enable-tcg-interpreter')
@@ -351,8 +359,6 @@ if not get_option('tcg').disabled()
     tcg_arch = 'i386'
   elif config_host['ARCH'] == 'ppc64'
     tcg_arch = 'ppc'
-  elif config_host['ARCH'] in ['riscv32', 'riscv64']
-    tcg_arch = 'riscv'
   endif
   add_project_arguments('-iquote', meson.current_source_dir() / 'tcg' / tcg_arch,
                         language: ['c', 'cpp', 'objc'])
@@ -564,13 +570,7 @@ endif
 spice_headers = spice.partial_dependency(compile_args: true, includes: true)
 
 rt = cc.find_library('rt', required: false)
-libdl = not_found
-if 'CONFIG_PLUGIN' in config_host
-  libdl = cc.find_library('dl', required: false)
-  if not cc.has_function('dlopen', dependencies: libdl)
-    error('dlopen not found')
-  endif
-endif
+
 libiscsi = not_found
 if not get_option('libiscsi').auto() or have_block
   libiscsi = dependency('libiscsi', version: '>=1.9.0',
@@ -679,6 +679,9 @@ iconv = not_found
 curses = not_found
 if have_system and not get_option('curses').disabled()
   curses_test = '''
+    #if defined(__APPLE__) || defined(__OpenBSD__)
+    #define _XOPEN_SOURCE_EXTENDED 1
+    #endif
     #include <locale.h>
     #include <curses.h>
     #include <wchar.h>
@@ -702,7 +705,7 @@ if have_system and not get_option('curses').disabled()
     endif
   endforeach
   msg = get_option('curses').enabled() ? 'curses library not found' : ''
-  curses_compile_args = ['-DNCURSES_WIDECHAR']
+  curses_compile_args = ['-DNCURSES_WIDECHAR=1']
   if curses.found()
     if cc.links(curses_test, args: curses_compile_args, dependencies: [curses])
       curses = declare_dependency(compile_args: curses_compile_args, dependencies: [curses])
@@ -911,7 +914,7 @@ if liblzfse.found() and not cc.links('''
 endif
 
 oss = not_found
-if not get_option('oss').auto() or have_system
+if have_system and not get_option('oss').disabled()
   if not cc.has_header('sys/soundcard.h')
     # not found
   elif targetos == 'netbsd'
@@ -924,8 +927,6 @@ if not get_option('oss').auto() or have_system
   if not oss.found()
     if get_option('oss').enabled()
       error('OSS not found')
-    else
-      warning('OSS not found, disabling')
     endif
   endif
 endif
@@ -938,8 +939,6 @@ if not get_option('dsound').auto() or (targetos == 'windows' and have_system)
   if not dsound.found()
     if get_option('dsound').enabled()
       error('DirectSound not found')
-    else
-      warning('DirectSound not found, disabling')
     endif
   endif
 endif
@@ -948,22 +947,6 @@ coreaudio = not_found
 if not get_option('coreaudio').auto() or (targetos == 'darwin' and have_system)
   coreaudio = dependency('appleframeworks', modules: 'CoreAudio',
                          required: get_option('coreaudio'))
-  if coreaudio.found() and not cc.links('''
-    #include <CoreAudio/CoreAudio.h>
-    int main(void)
-    {
-      return (int)AudioGetCurrentHostTime();
-    }''')
-    coreaudio = not_found
-  endif
-
-  if not coreaudio.found()
-    if get_option('coreaudio').enabled()
-      error('CoreAudio not found')
-    else
-      warning('CoreAudio not found, disabling')
-    endif
-  endif
 endif
 
 opengl = not_found
@@ -1131,7 +1114,7 @@ if not get_option('snappy').auto() or have_system
                            required: get_option('snappy'),
                            kwargs: static_kwargs)
 endif
-if snappy.found() and not cc.links('''
+if snappy.found() and not linker.links('''
    #include <snappy-c.h>
    int main(void) { snappy_max_compressed_length(4096); return 0; }''', dependencies: snappy)
   snappy = not_found
@@ -1218,6 +1201,11 @@ keyutils = dependency('libkeyutils', required: false,
                       method: 'pkg-config', kwargs: static_kwargs)
 
 has_gettid = cc.has_function('gettid')
+
+# libselinux
+selinux = dependency('libselinux',
+                     required: get_option('selinux'),
+                     method: 'pkg-config', kwargs: static_kwargs)
 
 # Malloc tests
 
@@ -1497,6 +1485,7 @@ config_host_data.set('CONFIG_SPICE_PROTOCOL', spice_protocol.found())
 config_host_data.set('CONFIG_SPICE', spice.found())
 config_host_data.set('CONFIG_X11', x11.found())
 config_host_data.set('CONFIG_CFI', get_option('cfi'))
+config_host_data.set('CONFIG_SELINUX', selinux.found())
 config_host_data.set('QEMU_VERSION', '"@0@"'.format(meson.project_version()))
 config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('.')[0])
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('.')[1])
@@ -1565,8 +1554,6 @@ config_host_data.set('CONFIG_INOTIFY',
                      cc.has_header_symbol('sys/inotify.h', 'inotify_init'))
 config_host_data.set('CONFIG_INOTIFY1',
                      cc.has_header_symbol('sys/inotify.h', 'inotify_init1'))
-config_host_data.set('CONFIG_IOVEC',
-                     cc.has_header_symbol('sys/uio.h', 'struct iovec'))
 config_host_data.set('CONFIG_MACHINE_BSWAP_H',
                      cc.has_header_symbol('machine/bswap.h', 'bswap32',
                                           prefix: '''#include <sys/endian.h>
@@ -1579,8 +1566,6 @@ config_host_data.set('CONFIG_SYSMACROS',
                      cc.has_header_symbol('sys/sysmacros.h', 'makedev'))
 config_host_data.set('HAVE_OPTRESET',
                      cc.has_header_symbol('getopt.h', 'optreset'))
-config_host_data.set('HAVE_UTMPX',
-                     cc.has_header_symbol('utmpx.h', 'struct utmpx'))
 config_host_data.set('HAVE_IPPROTO_MPTCP',
                      cc.has_header_symbol('netinet/in.h', 'IPPROTO_MPTCP'))
 
@@ -1591,6 +1576,14 @@ config_host_data.set('HAVE_SIGEV_NOTIFY_THREAD_ID',
 config_host_data.set('HAVE_STRUCT_STAT_ST_ATIM',
                      cc.has_member('struct stat', 'st_atim',
                                    prefix: '#include <sys/stat.h>'))
+
+# has_type
+config_host_data.set('CONFIG_IOVEC',
+                     cc.has_type('struct iovec',
+                                 prefix: '#include <sys/uio.h>'))
+config_host_data.set('HAVE_UTMPX',
+                     cc.has_type('struct utmpx',
+                                 prefix: '#include <utmpx.h>'))
 
 config_host_data.set('CONFIG_EVENTFD', cc.links('''
   #include <sys/eventfd.h>
@@ -1633,7 +1626,7 @@ config_host_data.set('CONFIG_POSIX_MADVISE', cc.links(gnu_source_prefix + '''
   #include <stddef.h>
   int main(void) { return posix_madvise(NULL, 0, POSIX_MADV_DONTNEED); }'''))
 
-config_host_data.set('CONFIG_PTHREAD_SETNAME_NP_W_TID', cc.links('''
+config_host_data.set('CONFIG_PTHREAD_SETNAME_NP_W_TID', cc.links(gnu_source_prefix + '''
   #include <pthread.h>
 
   static void *f(void *p) { return NULL; }
@@ -1644,7 +1637,7 @@ config_host_data.set('CONFIG_PTHREAD_SETNAME_NP_W_TID', cc.links('''
     pthread_setname_np(thread, "QEMU");
     return 0;
   }''', dependencies: threads))
-config_host_data.set('CONFIG_PTHREAD_SETNAME_NP_WO_TID', cc.links('''
+config_host_data.set('CONFIG_PTHREAD_SETNAME_NP_WO_TID', cc.links(gnu_source_prefix + '''
   #include <pthread.h>
 
   static void *f(void *p) { pthread_setname_np("QEMU"); return NULL; }
@@ -1678,6 +1671,15 @@ config_host_data.set('HAVE_MLOCKALL', cc.links(gnu_source_prefix + '''
     return mlockall(MCL_FUTURE);
   }'''))
 
+have_l2tpv3 = false
+if not get_option('l2tpv3').disabled() and have_system
+  have_l2tpv3 = cc.has_type('struct mmsghdr',
+    prefix: gnu_source_prefix + '''
+      #include <sys/socket.h>
+      #include <linux/ip.h>''')
+endif
+config_host_data.set('CONFIG_L2TPV3', have_l2tpv3)
+
 have_netmap = false
 if not get_option('netmap').disabled() and have_system
   have_netmap = cc.compiles('''
@@ -1700,7 +1702,7 @@ config_host_data.set('CONFIG_NETMAP', have_netmap)
 # xfs headers will not try to redefine structs from linux headers
 # if this macro is set.
 config_host_data.set('HAVE_FSXATTR', cc.links('''
-  #include <linux/fs.h>'
+  #include <linux/fs.h>
   struct fsxattr foo;
   int main(void) {
     return 0;
@@ -2365,6 +2367,7 @@ bsd_user_ss = ss.source_set()
 chardev_ss = ss.source_set()
 common_ss = ss.source_set()
 crypto_ss = ss.source_set()
+hwcore_ss = ss.source_set()
 io_ss = ss.source_set()
 linux_user_ss = ss.source_set()
 qmp_ss = ss.source_set()
@@ -2459,6 +2462,7 @@ if have_system
     'hw/s390x',
     'hw/scsi',
     'hw/sd',
+    'hw/sh4',
     'hw/sparc',
     'hw/sparc64',
     'hw/ssi',
@@ -2609,8 +2613,6 @@ subdir('plugins')
 subdir('bsd-user')
 subdir('linux-user')
 subdir('ebpf')
-
-common_ss.add(libbpf)
 
 specific_ss.add_all(when: 'CONFIG_BSD_USER', if_true: bsd_user_ss)
 
@@ -2805,7 +2807,8 @@ libchardev = static_library('chardev', chardev_ss.sources() + genh,
 
 chardev = declare_dependency(link_whole: libchardev)
 
-libhwcore = static_library('hwcore', sources: hwcore_files + genh,
+hwcore_ss = hwcore_ss.apply(config_host, strict: false)
+libhwcore = static_library('hwcore', sources: hwcore_ss.sources() + genh,
                            name_suffix: 'fa',
                            build_by_default: false)
 hwcore = declare_dependency(link_whole: libhwcore)
@@ -3064,7 +3067,8 @@ if have_tools
   qemu_io = executable('qemu-io', files('qemu-io.c'),
              dependencies: [block, qemuutil], install: true)
   qemu_nbd = executable('qemu-nbd', files('qemu-nbd.c'),
-               dependencies: [blockdev, qemuutil, gnutls], install: true)
+               dependencies: [blockdev, qemuutil, gnutls, selinux],
+               install: true)
 
   subdir('storage-daemon')
   subdir('contrib/rdmacm-mux')
@@ -3300,7 +3304,7 @@ endif
 summary_info += {'TCG support':       config_all.has_key('CONFIG_TCG')}
 if config_all.has_key('CONFIG_TCG')
   if get_option('tcg_interpreter')
-    summary_info += {'TCG backend':   'TCI (TCG with bytecode interpreter, experimental and slow)'}
+    summary_info += {'TCG backend':   'TCI (TCG with bytecode interpreter, slow)'}
   else
     summary_info += {'TCG backend':   'native (@0@)'.format(cpu)}
   endif
@@ -3394,6 +3398,7 @@ summary_info += {'JACK support':      jack}
 summary_info += {'brlapi support':    brlapi}
 summary_info += {'vde support':       vde}
 summary_info += {'netmap support':    have_netmap}
+summary_info += {'l2tpv3 support':    have_l2tpv3}
 summary_info += {'Linux AIO support': libaio}
 summary_info += {'Linux io_uring support': linux_io_uring}
 summary_info += {'ATTR/XATTR support': libattr}
@@ -3439,6 +3444,7 @@ summary_info += {'libdaxctl support': libdaxctl}
 summary_info += {'libudev':           libudev}
 # Dummy dependency, keep .found()
 summary_info += {'FUSE lseek':        fuse_lseek.found()}
+summary_info += {'selinux':           selinux}
 summary(summary_info, bool_yn: true, section: 'Dependencies')
 
 if not supported_cpus.contains(cpu)

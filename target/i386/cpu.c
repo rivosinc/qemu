@@ -3749,9 +3749,10 @@ static const X86CPUDefinition builtin_x86_defs[] = {
             },
             {
                 .version = 4,
-                .note = "no split lock detect",
+                .note = "no split lock detect, no core-capability",
                 .props = (PropValue[]) {
                     { "split-lock-detect", "off" },
+                    { "core-capability", "off" },
                     { /* end of list */ },
                 },
             },
@@ -4877,7 +4878,7 @@ static void x86_cpu_list_entry(gpointer data, gpointer user_data)
         desc = g_strdup_printf("%s", model_id);
     }
 
-    qemu_printf("x86 %-20s  %-58s\n", name, desc);
+    qemu_printf("x86 %-20s  %s\n", name, desc);
 }
 
 /* list available CPU models and flags */
@@ -5927,6 +5928,11 @@ static void x86_cpu_reset(DeviceState *dev)
     }
 
     x86_cpu_set_sgxlepubkeyhash(env);
+
+    if (env->features[FEAT_SVM] & CPUID_SVM_TSCSCALE) {
+        env->amd_tsc_scale_msr =  MSR_AMD64_TSC_RATIO_DEFAULT;
+    }
+
 #endif
 }
 

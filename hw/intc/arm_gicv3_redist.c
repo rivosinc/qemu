@@ -256,9 +256,10 @@ static MemTxResult gicr_writel(GICv3CPUState *cs, hwaddr offset,
                 cs->gicr_ctlr |= GICR_CTLR_ENABLE_LPIS;
                 /* Check for any pending interr in pending table */
                 gicv3_redist_update_lpi(cs);
-                gicv3_redist_update(cs);
             } else {
                 cs->gicr_ctlr &= ~GICR_CTLR_ENABLE_LPIS;
+                /* cs->hppi might have been an LPI; recalculate */
+                gicv3_redist_update(cs);
             }
         }
         return MEMTX_OK;
@@ -425,22 +426,24 @@ static MemTxResult gicr_writell(GICv3CPUState *cs, hwaddr offset,
 MemTxResult gicv3_redist_read(void *opaque, hwaddr offset, uint64_t *data,
                               unsigned size, MemTxAttrs attrs)
 {
-    GICv3State *s = opaque;
+    GICv3RedistRegion *region = opaque;
+    GICv3State *s = region->gic;
     GICv3CPUState *cs;
     MemTxResult r;
     int cpuidx;
 
     assert((offset & (size - 1)) == 0);
 
-    /* This region covers all the redistributor pages; there are
-     * (for GICv3) two 64K pages per CPU. At the moment they are
-     * all contiguous (ie in this one region), though we might later
-     * want to allow splitting of redistributor pages into several
-     * blocks so we can support more CPUs.
+    /*
+     * There are (for GICv3) two 64K redistributor pages per CPU.
+     * In some cases the redistributor pages for all CPUs are not
+     * contiguous (eg on the virt board they are split into two
+     * parts if there are too many CPUs to all fit in the same place
+     * in the memory map); if so then the GIC has multiple MemoryRegions
+     * for the redistributors.
      */
-    cpuidx = offset / 0x20000;
-    offset %= 0x20000;
-    assert(cpuidx < s->num_cpu);
+    cpuidx = region->cpuidx + offset / GICV3_REDIST_SIZE;
+    offset %= GICV3_REDIST_SIZE;
 
     cs = &s->cpu[cpuidx];
 
@@ -482,22 +485,24 @@ MemTxResult gicv3_redist_read(void *opaque, hwaddr offset, uint64_t *data,
 MemTxResult gicv3_redist_write(void *opaque, hwaddr offset, uint64_t data,
                                unsigned size, MemTxAttrs attrs)
 {
-    GICv3State *s = opaque;
+    GICv3RedistRegion *region = opaque;
+    GICv3State *s = region->gic;
     GICv3CPUState *cs;
     MemTxResult r;
     int cpuidx;
 
     assert((offset & (size - 1)) == 0);
 
-    /* This region covers all the redistributor pages; there are
-     * (for GICv3) two 64K pages per CPU. At the moment they are
-     * all contiguous (ie in this one region), though we might later
-     * want to allow splitting of redistributor pages into several
-     * blocks so we can support more CPUs.
+    /*
+     * There are (for GICv3) two 64K redistributor pages per CPU.
+     * In some cases the redistributor pages for all CPUs are not
+     * contiguous (eg on the virt board they are split into two
+     * parts if there are too many CPUs to all fit in the same place
+     * in the memory map); if so then the GIC has multiple MemoryRegions
+     * for the redistributors.
      */
-    cpuidx = offset / 0x20000;
-    offset %= 0x20000;
-    assert(cpuidx < s->num_cpu);
+    cpuidx = region->cpuidx + offset / GICV3_REDIST_SIZE;
+    offset %= GICV3_REDIST_SIZE;
 
     cs = &s->cpu[cpuidx];
 
@@ -567,7 +572,7 @@ static void gicv3_redist_check_lpi_priority(GICv3CPUState *cs, int irq)
     }
 }
 
-void gicv3_redist_update_lpi(GICv3CPUState *cs)
+void gicv3_redist_update_lpi_only(GICv3CPUState *cs)
 {
     /*
      * This function scans the LPI pending table and for each pending
@@ -610,6 +615,12 @@ void gicv3_redist_update_lpi(GICv3CPUState *cs)
     }
 }
 
+void gicv3_redist_update_lpi(GICv3CPUState *cs)
+{
+    gicv3_redist_update_lpi_only(cs);
+    gicv3_redist_update(cs);
+}
+
 void gicv3_redist_lpi_pending(GICv3CPUState *cs, int irq, int level)
 {
     /*
@@ -647,6 +658,7 @@ void gicv3_redist_lpi_pending(GICv3CPUState *cs, int irq, int level)
      */
     if (level) {
         gicv3_redist_check_lpi_priority(cs, irq);
+        gicv3_redist_update(cs);
     } else {
         if (irq == cs->hpplpi.irq) {
             gicv3_redist_update_lpi(cs);
@@ -669,8 +681,6 @@ void gicv3_redist_process_lpi(GICv3CPUState *cs, int irq, int level)
 
     /* set/clear the pending bit for this irq */
     gicv3_redist_lpi_pending(cs, irq, level);
-
-    gicv3_redist_update(cs);
 }
 
 void gicv3_redist_set_irq(GICv3CPUState *cs, int irq, int level)

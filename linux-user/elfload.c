@@ -925,8 +925,6 @@ static void elf_core_copy_regs(target_elf_gregset_t *regs, const CPUPPCState *en
 #endif
 #define ELF_ARCH    EM_MIPS
 
-#define elf_check_arch(x) ((x) == EM_MIPS || (x) == EM_NANOMIPS)
-
 #ifdef TARGET_ABI_MIPSN32
 #define elf_check_abi(x) ((x) & EF_MIPS_ABI2)
 #else
@@ -3256,9 +3254,13 @@ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info)
      * Otherwise, allocate a private page to hold them.
      */
     if (TARGET_ARCH_HAS_SIGTRAMP_PAGE) {
-        abi_ulong tramp_page = target_mmap(0, TARGET_PAGE_SIZE,
-                                           PROT_READ | PROT_WRITE,
-                                           MAP_PRIVATE | MAP_ANON, -1, 0);
+        abi_long tramp_page = target_mmap(0, TARGET_PAGE_SIZE,
+                                          PROT_READ | PROT_WRITE,
+                                          MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (tramp_page == -1) {
+            return -errno;
+        }
+
         setup_sigtramp(tramp_page);
         target_mprotect(tramp_page, TARGET_PAGE_SIZE, PROT_READ | PROT_EXEC);
     }

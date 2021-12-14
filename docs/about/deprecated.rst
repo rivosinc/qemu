@@ -160,6 +160,11 @@ Use ``-display sdl`` instead.
 
 Use ``-display curses`` instead.
 
+``-watchdog`` (since 6.2)
+'''''''''''''''''''''''''
+
+Use ``-device`` instead.
+
 ``-smp`` ("parameter=0" SMP configurations) (since 6.2)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
@@ -186,6 +191,12 @@ Therefore, the usage of ``arg`` is redundant. Single-word arguments are treated
 as short-form boolean values, and passed to plugins as ``arg_name=on``.
 However, short-form booleans are deprecated and full explicit ``arg_name=on``
 form is preferred.
+
+``-drive if=none`` for the sifive_u OTP device (since 6.2)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Using ``-drive if=none`` to configure the OTP device of the sifive_u
+RISC-V machine is deprecated. Use ``-drive if=pflash`` instead.
 
 
 QEMU Machine Protocol (QMP) commands
@@ -227,6 +238,37 @@ Use arguments ``base-node`` and ``top-node`` instead.
 Use the more generic commands ``block-export-add`` and ``block-export-del``
 instead.  As part of this deprecation, where ``nbd-server-add`` used a
 single ``bitmap``, the new ``block-export-add`` uses a list of ``bitmaps``.
+
+``query-qmp-schema`` return value member ``values`` (since 6.2)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Member ``values`` in return value elements with meta-type ``enum`` is
+deprecated.  Use ``members`` instead.
+
+``drive-backup`` (since 6.2)
+''''''''''''''''''''''''''''
+
+Use ``blockdev-backup`` in combination with ``blockdev-add`` instead.
+This change primarily separates the creation/opening process of the backup
+target with explicit, separate steps. ``blockdev-backup`` uses mostly the
+same arguments as ``drive-backup``, except the ``format`` and ``mode``
+options are removed in favor of using explicit ``blockdev-create`` and
+``blockdev-add`` calls. See :doc:`/interop/live-block-operations` for
+details.
+
+Incorrectly typed ``device_add`` arguments (since 6.2)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Due to shortcomings in the internal implementation of ``device_add``, QEMU
+incorrectly accepts certain invalid arguments: Any object or list arguments are
+silently ignored. Other argument types are not checked, but an implicit
+conversion happens, so that e.g. string values can be assigned to integer
+device properties or vice versa.
+
+This is a bug in QEMU that will be fixed in the future so that previously
+accepted incorrect commands will return an error. Users should make sure that
+all arguments passed to ``device_add`` are consistent with the documented
+property types.
 
 System accelerators
 -------------------
@@ -307,6 +349,16 @@ full SCSI support.  Use virtio-scsi instead when SCSI passthrough is required.
 Note this also applies to ``-device virtio-blk-pci,scsi=on|off``, which is an
 alias.
 
+``-device sga`` (since 6.2)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ``sga`` device loads an option ROM for x86 targets which enables
+SeaBIOS to send messages to the serial console. SeaBIOS 1.11.0 onwards
+contains native support for this feature and thus use of the option
+ROM approach is obsolete. The native SeaBIOS support can be activated
+by using ``-machine graphics=off``.
+
+
 Block device options
 ''''''''''''''''''''
 
@@ -348,9 +400,6 @@ MIPS ``I7200`` CPU (since 5.2)
 The ``I7200`` guest CPU relies on the nanoMIPS ISA, which is deprecated
 (the ISA has never been upstreamed to a compiler toolchain). Therefore
 this CPU is also deprecated.
-
-Related binaries
-----------------
 
 Backwards compatibility
 -----------------------

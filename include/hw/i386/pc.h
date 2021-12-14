@@ -35,6 +35,7 @@ typedef struct PCMachineState {
     I2CBus *smbus;
     PFlashCFI01 *flash[2];
     ISADevice *pcspk;
+    DeviceState *iommu;
 
     /* Configuration options: */
     uint64_t max_ram_below_4g;
@@ -115,9 +116,6 @@ struct PCMachineClass {
 
     /* generate legacy CPU hotplug AML */
     bool legacy_cpu_hotplug;
-
-    /* use DMA capable linuxboot option rom */
-    bool linuxboot_dma_enabled;
 
     /* use PVH to load kernels that support this feature */
     bool pvh_enabled;

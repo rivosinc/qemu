@@ -1895,8 +1895,8 @@ SRST
         Valid parameters are:
 
         ``grab-mod=<mods>`` : Used to select the modifier keys for toggling
-        the mouse grabbing in conjunction with the "g" key. `<mods>` can be
-        either `lshift-lctrl-lalt` or `rctrl`.
+        the mouse grabbing in conjunction with the "g" key. ``<mods>`` can be
+        either ``lshift-lctrl-lalt`` or ``rctrl``.
 
         ``alt_grab=on|off`` : Use Control+Alt+Shift-g to toggle mouse grabbing.
         This parameter is deprecated - use ``grab-mod`` instead.
@@ -3641,7 +3641,9 @@ DEFHEADING(Debug/Expert options:)
 
 DEF("compat", HAS_ARG, QEMU_OPTION_compat,
     "-compat [deprecated-input=accept|reject|crash][,deprecated-output=accept|hide]\n"
-    "                Policy for handling deprecated management interfaces\n",
+    "                Policy for handling deprecated management interfaces\n"
+    "-compat [unstable-input=accept|reject|crash][,unstable-output=accept|hide]\n"
+    "                Policy for handling unstable management interfaces\n",
     QEMU_ARCH_ALL)
 SRST
 ``-compat [deprecated-input=@var{input-policy}][,deprecated-output=@var{output-policy}]``
@@ -3657,6 +3659,22 @@ SRST
         Emit deprecated command results and events
     ``deprecated-output=hide``
         Suppress deprecated command results and events
+
+    Limitation: covers only syntactic aspects of QMP.
+
+``-compat [unstable-input=@var{input-policy}][,unstable-output=@var{output-policy}]``
+    Set policy for handling unstable management interfaces (experimental):
+
+    ``unstable-input=accept`` (default)
+        Accept unstable commands and arguments
+    ``unstable-input=reject``
+        Reject unstable commands and arguments
+    ``unstable-input=crash``
+        Crash on unstable commands and arguments
+    ``unstable-output=accept`` (default)
+        Emit unstable command results and events
+    ``unstable-output=hide``
+        Suppress unstable command results and events
 
     Limitation: covers only syntactic aspects of QMP.
 ERST
@@ -5171,7 +5189,7 @@ SRST
                  -object secret,id=sec0,keyid=secmaster0,format=base64,\\
                      data=$SECRET,iv=$(<iv.b64)
 
-    ``-object sev-guest,id=id,cbitpos=cbitpos,reduced-phys-bits=val,[sev-device=string,policy=policy,handle=handle,dh-cert-file=file,session-file=file]``
+    ``-object sev-guest,id=id,cbitpos=cbitpos,reduced-phys-bits=val,[sev-device=string,policy=policy,handle=handle,dh-cert-file=file,session-file=file,kernel-hashes=on|off]``
         Create a Secure Encrypted Virtualization (SEV) guest object,
         which can be used to provide the guest memory encryption support
         on AMD processors.
@@ -5210,6 +5228,10 @@ SRST
         and session parameters are used for establishing a cryptographic
         session with the guest owner to negotiate keys used for
         attestation. The file must be encoded in base64.
+
+        The ``kernel-hashes`` adds the hashes of given kernel/initrd/
+        cmdline to a designated guest firmware page for measured Linux
+        boot with -kernel. The default is off. (Since 6.2)
 
         e.g to launch a SEV guest
 

@@ -38,20 +38,34 @@ static void gtk_gl_area_set_scanout_mode(VirtualConsole *vc, bool scanout)
 
 void gd_gl_area_draw(VirtualConsole *vc)
 {
-    int ww, wh, y1, y2;
+#ifdef CONFIG_GBM
+    QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
+#endif
+    int ww, wh, ws, y1, y2;
 
     if (!vc->gfx.gls) {
         return;
     }
 
     gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
-    ww = gtk_widget_get_allocated_width(vc->gfx.drawing_area);
-    wh = gtk_widget_get_allocated_height(vc->gfx.drawing_area);
+    ws = gdk_window_get_scale_factor(gtk_widget_get_window(vc->gfx.drawing_area));
+    ww = gtk_widget_get_allocated_width(vc->gfx.drawing_area) * ws;
+    wh = gtk_widget_get_allocated_height(vc->gfx.drawing_area) * ws;
 
     if (vc->gfx.scanout_mode) {
         if (!vc->gfx.guest_fb.framebuffer) {
             return;
         }
+
+#ifdef CONFIG_GBM
+        if (dmabuf) {
+            if (!dmabuf->draw_submitted) {
+                return;
+            } else {
+                dmabuf->draw_submitted = false;
+            }
+        }
+#endif
 
         glBindFramebuffer(GL_READ_FRAMEBUFFER, vc->gfx.guest_fb.framebuffer);
         /* GtkGLArea sets GL_DRAW_FRAMEBUFFER for us */
@@ -62,6 +76,22 @@ void gd_gl_area_draw(VirtualConsole *vc)
         glBlitFramebuffer(0, y1, vc->gfx.w, y2,
                           0, 0, ww, wh,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+#ifdef CONFIG_GBM
+        if (dmabuf) {
+            egl_dmabuf_create_sync(dmabuf);
+        }
+#endif
+        glFlush();
+#ifdef CONFIG_GBM
+        if (dmabuf) {
+            egl_dmabuf_create_fence(dmabuf);
+            if (dmabuf->fence_fd > 0) {
+                qemu_set_fd_handler(dmabuf->fence_fd, gd_hw_gl_flushed, NULL, vc);
+                return;
+            }
+            graphic_hw_gl_block(vc->gfx.dcl.con, false);
+        }
+#endif
     } else {
         if (!vc->gfx.ds) {
             return;
@@ -72,25 +102,6 @@ void gd_gl_area_draw(VirtualConsole *vc)
         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
     }
 
-#ifdef CONFIG_GBM
-    if (vc->gfx.guest_fb.dmabuf) {
-        egl_dmabuf_create_sync(vc->gfx.guest_fb.dmabuf);
-    }
-#endif
-
-    glFlush();
-#ifdef CONFIG_GBM
-    if (vc->gfx.guest_fb.dmabuf) {
-        QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
-
-        egl_dmabuf_create_fence(dmabuf);
-        if (dmabuf->fence_fd > 0) {
-            qemu_set_fd_handler(dmabuf->fence_fd, gd_hw_gl_flushed, NULL, vc);
-            return;
-        }
-        graphic_hw_gl_block(vc->gfx.dcl.con, false);
-    }
-#endif
     graphic_hw_gl_flushed(vc->gfx.dcl.con);
 }
 
@@ -111,6 +122,9 @@ void gd_gl_area_update(DisplayChangeListener *dcl,
 void gd_gl_area_refresh(DisplayChangeListener *dcl)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
+
+    vc->gfx.dcl.update_interval = gd_monitor_update_interval(
+            vc->window ? vc->window : vc->gfx.drawing_area);
 
     if (!vc->gfx.gls) {
         if (!gtk_widget_get_realized(vc->gfx.drawing_area)) {
@@ -234,6 +248,7 @@ void gd_gl_area_scanout_flush(DisplayChangeListener *dcl,
 
     if (vc->gfx.guest_fb.dmabuf) {
         graphic_hw_gl_block(vc->gfx.dcl.con, true);
+        vc->gfx.guest_fb.dmabuf->draw_submitted = true;
     }
     gtk_gl_area_queue_render(GTK_GL_AREA(vc->gfx.drawing_area));
 }
