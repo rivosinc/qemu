@@ -301,6 +301,11 @@ QEMU_PLUGIN_EXPORT
 int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                         int argc, char **argv)
 {
+    if (info->system_emulation == true) {
+        fprintf(stderr, "bbvgen: only support for user mode execution\n");
+        return -1;
+    }
+
     for (int i = 0; i < argc; i++) {
         char *opt = argv[i];
         g_autofree char **tokens = g_strsplit(opt, "=", 2);
