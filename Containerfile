@@ -31,7 +31,43 @@ RUN /src/configure --prefix=/rivos/qemu \
     make plugins && \
     make install
 
-# Copy the built qemu into a fresh image.
+### Stage 2: Create a .deb Ubuntu package
+FROM gitlab.ba.rivosinc.com:5050/rv/it/rivos-sdk/packager:latest as qemu_packager
+
+COPY --from=qemu_builder /rivos/qemu /rivos/qemu
+COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /rivos/qemu/plugins/
+
+ARG UPVER
+ARG PKGVER
+ARG CI_JOB_TOKEN
+ARG CI_PROJECT_NAME
+ARG CI_PROJECT_URL
+ARG SECTION
+
+RUN ./build_upload_package --deb \
+  --arch amd64 \
+  ${SECTION:+--component ${SECTION}} \
+  --description "Open-source machine emulator." \
+  --directory "/rivos/qemu" \
+  -d libaio1 \
+  -d libbz2-1.0 \
+  -d libcap2 \
+  -d libcap-ng0 \
+  -d libcurl4 \
+  -d libglib2.0-0 \
+  -d libfdt1 \
+  -d liblzo2-2 \
+  -d libpixman-1-0 \
+  -d libssh2-1 \
+  -d zlib1g \
+  --license "GPL-2.0" \
+  --name "${CI_PROJECT_NAME}" \
+  --pkg_version "${PKGVER}" \
+  --token "${CI_JOB_TOKEN}" \
+  --url "${CI_PROJECT_URL}" \
+  --upstream_version "${UPVER}"
+
+### Stage 3: Copy the built qemu into a fresh container image.
 FROM ubuntu:20.04 as qemu
 COPY --from=qemu_builder /rivos/qemu /rivos/qemu
 COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /rivos/qemu/plugins/
