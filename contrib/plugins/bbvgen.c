@@ -415,15 +415,13 @@ static unsigned distance_bucket(uint64_t first, uint64_t second)
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 {
-    BlockInfo *blkinfo = NULL;
-    const uint64_t hash = (uint64_t) udata;
+    BlockInfo *blkinfo = (BlockInfo *) udata;
 
     // If we're looking for taken branches, we need info from the
     // previous basic block, and have to look up this one. Since this
     // is significant extra work, we don't want to do it unless the
     // user asked.
     if (do_fetch_stats) {
-        blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
         //printf("Block @ %012" PRIx64 "\n", blkinfo->start_addr);
 
         // First determine if the block we're about to execute is at
@@ -497,9 +495,6 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 
     end_interval();
 
-    if (blkinfo == NULL) {
-        blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
-    }
     // Remember the PC that started each interval
     intv_start_pc = blkinfo->start_addr;
 
@@ -571,7 +566,7 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     // Run the callback to check for end-of-interval
     qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_tb_exec,
                                          QEMU_PLUGIN_CB_NO_REGS,
-                                         (void *)hash);
+                                         (void *)blkinfo);
 
     // Bump the total and block exec counts. The order of registration
     // doesn't matter; inline operations run after callbacks.
