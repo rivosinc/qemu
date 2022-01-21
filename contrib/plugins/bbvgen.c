@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 by Rivos Inc.
+ * Copyright (c) 2021-2022 by Rivos Inc.
  *
  * Generate Basic Block Vectors from an execution into a gzipped file
  * (bbv.gz by default). If provided, a single argument overrides the
@@ -65,15 +65,20 @@ static uint32_t interval = 0;
 static uint64_t intv_start_pc = -1;
 static uint64_t total_insns = 0;
 
+// BlockInfo records details about a particular TCG translation block
+// and its execution stats. The '*_count' members track the number of
+// instructions executed as part of this TB (block executions * block
+// instruction count).
 typedef struct {
-    uint64_t id;
-    uint64_t start_addr;
-    uint64_t last_pc;
-    uint64_t exec_count;
-    uint64_t total_count;
-    uint32_t insns;
-    uint32_t bytes;
-    uint16_t *off_to_inst;
+    uint64_t id;                // ID assigned for BB
+    uint64_t start_addr;        // starting PC of this TB
+    uint64_t last_pc;           // PC of the last inst in the TB
+    uint64_t exec_count;        // scaled count (#exec * #insns) for
+                                // this TB in the current interval
+    uint64_t total_count;       // total scaled count for this TB
+    uint32_t insns;             // number of insns in the TB
+    uint32_t bytes;             // total insn bytes in the TB
+    uint16_t *off_to_inst;      // byte offset to each insn
 } BlockInfo;
 
 // Taken-branch detection requires some information on the previous
@@ -272,7 +277,9 @@ static void emit_fetch_stats(struct fetch_info *info, unsigned indent, bool more
 static void plugin_exit(qemu_plugin_id_t id, void *p)
 {
     end_interval();
+
     total_insns += cur_insns;
+
     gzclose_w(bbv_file);
 
     if (bbvi_file != Z_NULL) {
@@ -488,11 +495,13 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     // The callback has to run for every TB execution so we can detect
     // the end of an interval. Most of the time we just bail
     // immediately. Note that inline operations (counter increment)
-    // run after callbacks.
+    // run after callbacks, which means we're evaluating the number of
+    // instructions executed up through the *previous* TB.
     if (cur_insns + drift < intv_length) {
-      return;
+        return;
     }
 
+    // Emit all the interval stats and reset the block counts
     end_interval();
 
     // Remember the PC that started each interval
@@ -517,7 +526,7 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     // Special case the initial PC since hereafter these are latched
     // on interval instruction count overflow in the tb_exec callback.
     if (intv_start_pc == -1) {
-      intv_start_pc = pc;
+        intv_start_pc = pc;
     }
 
     // The start PC should uniquely identify a BB, even as previous
@@ -527,39 +536,39 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     g_mutex_lock(&lock);
     blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
     if (blkinfo) {
-      // Current assumption is a regenerated TB should exactly match
-      // what we have in the hash table. We'll see if this ever turns
-      // out to be false.
-      g_assert(blkinfo->start_addr == pc && blkinfo->insns == insns);
+        // Current assumption is a regenerated TB should exactly match
+        // what we have in the hash table. We'll see if this ever
+        // turns out to be false.
+        g_assert(blkinfo->start_addr == pc && blkinfo->insns == insns);
     } else {
-      blkinfo = g_new0(BlockInfo, 1);
-      blkinfo->id = bb_id++;
-      blkinfo->start_addr = pc;
-      blkinfo->insns = insns;
-      g_hash_table_insert(allblocks, (gpointer) hash, (gpointer) blkinfo);
-      if (do_fetch_stats) {
-          size_t n = qemu_plugin_tb_n_insns(tb);
-          size_t bytes = 0;
-          // Since blocks can be of arbitrary size, dynamically
-          // allocate the off_to_inst array. Have to iterate the
-          // instructions to get the byte size of the block.
-          for (size_t i = 0; i < n; i++) {
-              struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
-              blkinfo->last_pc = pc + bytes;
-              bytes += qemu_plugin_insn_size(insn);
-          }
-          blkinfo->off_to_inst = g_new0(uint16_t, bytes/2);
-          // Log each instruction start in the offset array. A zero at
-          // any index means (index+1)*2 bytes is in the middle of an
-          // instruction. A non-zero value means that many
-          // instructions are included in the first (index+1)*2 bytes
-          // of the block.
-          for (size_t i = 0; i < n; i++) {
-              struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
-              blkinfo->bytes += qemu_plugin_insn_size(insn);
-              blkinfo->off_to_inst[blkinfo->bytes/2-1] = i+1;
-          }
-      }
+        blkinfo = g_new0(BlockInfo, 1);
+        blkinfo->id = bb_id++;
+        blkinfo->start_addr = pc;
+        blkinfo->insns = insns;
+        g_hash_table_insert(allblocks, (gpointer) hash, (gpointer) blkinfo);
+        if (do_fetch_stats) {
+            size_t n = qemu_plugin_tb_n_insns(tb);
+            size_t bytes = 0;
+            // Since blocks can be of arbitrary size, dynamically
+            // allocate the off_to_inst array. Have to iterate the
+            // instructions to get the byte size of the block.
+            for (size_t i = 0; i < n; i++) {
+                struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+                blkinfo->last_pc = pc + bytes;
+                bytes += qemu_plugin_insn_size(insn);
+            }
+            blkinfo->off_to_inst = g_new0(uint16_t, bytes/2);
+            // Log each instruction start in the offset array. A zero at
+            // any index means (index+1)*2 bytes is in the middle of an
+            // instruction. A non-zero value means that many
+            // instructions are included in the first (index+1)*2 bytes
+            // of the block.
+            for (size_t i = 0; i < n; i++) {
+                struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
+                blkinfo->bytes += qemu_plugin_insn_size(insn);
+                blkinfo->off_to_inst[blkinfo->bytes/2-1] = i+1;
+            }
+        }
     }
     g_mutex_unlock(&lock);
 
