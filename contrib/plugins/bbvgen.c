@@ -223,6 +223,12 @@ static void end_interval(void)
 
     g_list_foreach(blocks, latch_count, NULL);
     g_list_free(blocks);
+
+    // Get ready to start counting the next interval. No harm in the
+    // case where we're closing out a final, partial interval.
+    total_insns += cur_insns;
+    cur_insns = 0;
+    interval++;
 }
 
 static void emit_fetch_stats_array(struct fetch_info *info, bool insts, unsigned indent, bool more)
@@ -276,12 +282,13 @@ static void emit_fetch_stats(struct fetch_info *info, unsigned indent, bool more
 
 static void plugin_exit(qemu_plugin_id_t id, void *p)
 {
+    // Flush the partial interval that was in progress when the
+    // program exited.
     end_interval();
-
-    total_insns += cur_insns;
 
     gzclose_w(bbv_file);
 
+    // Write out some details covering the entire execution
     if (bbvi_file != Z_NULL) {
         gzprintf(bbvi_file, "\n    ],\n");
         gzprintf(bbvi_file, "    \"instructions\" : %"PRIu64",\n", total_insns);
@@ -501,20 +508,15 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
         return;
     }
 
+    // Track drift due to ending intervals on block boundaries. We
+    // want interval starts to stay close to (intv_num * intv_length).
+    drift = (cur_insns + drift) - intv_length;
+
     // Emit all the interval stats and reset the block counts
     end_interval();
 
     // Remember the PC that started each interval
     intv_start_pc = blkinfo->start_addr;
-
-    // Track drift due to ending intervals on block boundaries. We
-    // want interval starts to stay close to (intv_num * intv_length).
-    drift = (cur_insns + drift) - intv_length;
-
-    // Start counting the next interval
-    total_insns += cur_insns;
-    cur_insns = 0;
-    interval++;
 }
 
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
