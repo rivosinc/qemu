@@ -132,9 +132,9 @@ static void dump_interval(GList *blocks)
     uint64_t count = 0;
     GList *it = blocks;
     while (it) {
-       BlockInfo *rec = (BlockInfo *) it->data;
-       gzprintf(bbv_file, ":%"PRIu64":%"PRIu64" ", rec->id, rec->exec_count);
-       count += rec->exec_count;
+       BlockInfo *blkinfo = (BlockInfo *) it->data;
+       gzprintf(bbv_file, ":%"PRIu64":%"PRIu64" ", blkinfo->id, blkinfo->exec_count);
+       count += blkinfo->exec_count;
        it = it->next;
     }
     g_assert(count == cur_insns);
@@ -146,8 +146,8 @@ static void filter_block(gpointer key,
                          gpointer user_data)
 {
     GList **blocks = (GList **)user_data;
-    BlockInfo *cnt = (BlockInfo *) value;
-    if (cnt->exec_count > 0) {
+    BlockInfo *blkinfo = (BlockInfo *) value;
+    if (blkinfo->exec_count > 0) {
         *blocks = g_list_prepend(*blocks, value);
     }
 }
@@ -157,11 +157,11 @@ static void filter_block_final(gpointer key,
                                gpointer user_data)
 {
     GList **blocks = (GList **)user_data;
-    BlockInfo *cnt = (BlockInfo *) value;
+    BlockInfo *blkinfo = (BlockInfo *) value;
     // Move the total_count into exec_count, so the final top blocks
     // summary can reuse cmp_exec_count and emit_hot_blocks.
-    cnt->exec_count = cnt->total_count;
-    if (cnt->exec_count > 0) {
+    blkinfo->exec_count = blkinfo->total_count;
+    if (blkinfo->exec_count > 0) {
         *blocks = g_list_prepend(*blocks, value);
     }
 }
@@ -169,24 +169,24 @@ static void filter_block_final(gpointer key,
 static void latch_count(gpointer data,
                         gpointer user_data)
 {
-    BlockInfo *cnt = (BlockInfo *) data;
+    BlockInfo *blkinfo = (BlockInfo *) data;
     // Accumulate the total count for the final summary; reset the
     // exec count for the next interval.
-    cnt->total_count += cnt->exec_count;
-    cnt->exec_count = 0;
+    blkinfo->total_count += blkinfo->exec_count;
+    blkinfo->exec_count = 0;
 }
 
 static void emit_hot_blocks(GList *blocks, unsigned count, uint64_t region_count, unsigned indent)
 {
     GList *it = blocks;
     for (unsigned i = 0; (i < count) && it; i++, it = it->next) {
-        BlockInfo *block = (BlockInfo *)it->data;
+        BlockInfo *blkinfo = (BlockInfo *)it->data;
         if (i > 0) {
             gzprintf(bbvi_file, ",\n");
         }
         gzprintf(bbvi_file, "%*s{\"pc\" : %"PRIu64", \"len\" : %lu, \"icount\" : %"PRIu64", \"pct\": %.2f }",
-                 indent, " ", block->start_addr, block->insns, block->exec_count,
-                 (float)block->exec_count*100 / region_count);
+                 indent, " ", blkinfo->start_addr, blkinfo->insns, blkinfo->exec_count,
+                 (float)blkinfo->exec_count*100 / region_count);
     }
     gzprintf(bbvi_file, "\n");
 }
@@ -415,7 +415,7 @@ static unsigned distance_bucket(uint64_t first, uint64_t second)
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 {
-    BlockInfo *cnt = NULL;
+    BlockInfo *blkinfo = NULL;
     const uint64_t hash = (uint64_t) udata;
 
     // If we're looking for taken branches, we need info from the
@@ -423,8 +423,8 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     // is significant extra work, we don't want to do it unless the
     // user asked.
     if (do_fetch_stats) {
-        cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
-        //printf("Block @ %012" PRIx64 "\n", cnt->start_addr);
+        blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+        //printf("Block @ %012" PRIx64 "\n", blkinfo->start_addr);
 
         // First determine if the block we're about to execute is at
         // the target of a taken branch. This affects all the fetch
@@ -432,7 +432,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
         bool taken = false;
 
         if (prev_block) {
-            const uint64_t target_pc = cnt->start_addr;
+            const uint64_t target_pc = blkinfo->start_addr;
             const uint64_t fallthrough_pc = prev_block->start_addr + prev_block->bytes;
             taken = (target_pc != fallthrough_pc);
             if (taken) {
@@ -468,7 +468,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
                 // have seen the first taken branch.
                 info->one_taken = true;
                 info->took_one++;
-                const uint64_t target_pc = cnt->start_addr;
+                const uint64_t target_pc = blkinfo->start_addr;
                 const uint64_t branch_pc = prev_block->last_pc;
                 unsigned bucket = distance_bucket(info->first_addr, target_pc);
                 info->distance_buckets[F_BUCKETS][bucket]++;
@@ -477,13 +477,13 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
             }
         }
 
-        prev_block = cnt;
+        prev_block = blkinfo;
 
         // Now consume the rest of this block, logging each completed
         // fetch group.
         //printf(" -LOOP-\n");
         for (unsigned i = 0; i < NUM_FETCH_ALGO; i++) {
-            fetch_loop(&finfos[i], cnt);
+            fetch_loop(&finfos[i], blkinfo);
         }
     }
 
@@ -497,11 +497,11 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 
     end_interval();
 
-    if (cnt == NULL) {
-        cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+    if (blkinfo == NULL) {
+        blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
     }
     // Remember the PC that started each interval
-    intv_start_pc = cnt->start_addr;
+    intv_start_pc = blkinfo->start_addr;
 
     // Track drift due to ending intervals on block boundaries. We
     // want interval starts to stay close to (intv_num * intv_length).
@@ -515,7 +515,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 {
-    BlockInfo *cnt;
+    BlockInfo *blkinfo;
     const uint64_t pc = qemu_plugin_tb_vaddr(tb);
     const size_t insns = qemu_plugin_tb_n_insns(tb);
 
@@ -530,18 +530,18 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     const uint64_t hash = pc;
 
     g_mutex_lock(&lock);
-    cnt = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
-    if (cnt) {
+    blkinfo = (BlockInfo *) g_hash_table_lookup(allblocks, (gconstpointer) hash);
+    if (blkinfo) {
       // Current assumption is a regenerated TB should exactly match
       // what we have in the hash table. We'll see if this ever turns
       // out to be false.
-      g_assert(cnt->start_addr == pc && cnt->insns == insns);
+      g_assert(blkinfo->start_addr == pc && blkinfo->insns == insns);
     } else {
-      cnt = g_new0(BlockInfo, 1);
-      cnt->id = bb_id++;
-      cnt->start_addr = pc;
-      cnt->insns = insns;
-      g_hash_table_insert(allblocks, (gpointer) hash, (gpointer) cnt);
+      blkinfo = g_new0(BlockInfo, 1);
+      blkinfo->id = bb_id++;
+      blkinfo->start_addr = pc;
+      blkinfo->insns = insns;
+      g_hash_table_insert(allblocks, (gpointer) hash, (gpointer) blkinfo);
       if (do_fetch_stats) {
           size_t n = qemu_plugin_tb_n_insns(tb);
           size_t bytes = 0;
@@ -550,10 +550,10 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
           // instructions to get the byte size of the block.
           for (size_t i = 0; i < n; i++) {
               struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
-              cnt->last_pc = pc + bytes;
+              blkinfo->last_pc = pc + bytes;
               bytes += qemu_plugin_insn_size(insn);
           }
-          cnt->off_to_inst = g_new0(uint16_t, bytes/2);
+          blkinfo->off_to_inst = g_new0(uint16_t, bytes/2);
           // Log each instruction start in the offset array. A zero at
           // any index means (index+1)*2 bytes is in the middle of an
           // instruction. A non-zero value means that many
@@ -561,8 +561,8 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
           // of the block.
           for (size_t i = 0; i < n; i++) {
               struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
-              cnt->bytes += qemu_plugin_insn_size(insn);
-              cnt->off_to_inst[cnt->bytes/2-1] = i+1;
+              blkinfo->bytes += qemu_plugin_insn_size(insn);
+              blkinfo->off_to_inst[blkinfo->bytes/2-1] = i+1;
           }
       }
     }
@@ -576,9 +576,9 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
     // Bump the total and block exec counts. The order of registration
     // doesn't matter; inline operations run after callbacks.
     qemu_plugin_register_vcpu_tb_exec_inline(tb, QEMU_PLUGIN_INLINE_ADD_U64,
-                                             &cur_insns, cnt->insns);
+                                             &cur_insns, blkinfo->insns);
     qemu_plugin_register_vcpu_tb_exec_inline(tb, QEMU_PLUGIN_INLINE_ADD_U64,
-                                             &cnt->exec_count, cnt->insns);
+                                             &blkinfo->exec_count, blkinfo->insns);
 }
 
 QEMU_PLUGIN_EXPORT
