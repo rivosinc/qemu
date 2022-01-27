@@ -32,7 +32,7 @@ RUN /src/configure --prefix=/rivos/qemu \
     make install
 
 ### Stage 2: Create a .deb Ubuntu package
-FROM gitlab.ba.rivosinc.com:5050/rv/it/rivos-sdk/packager:latest as qemu_packager
+FROM gitlab.ba.rivosinc.com:5050/rv/it/int/rivos-sdk/packager:latest as qemu_packager
 
 COPY --from=qemu_builder /rivos/qemu /rivos/qemu
 COPY --from=qemu_builder /tmp/build/contrib/plugins/*.so /rivos/qemu/plugins/
