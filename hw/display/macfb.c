@@ -616,7 +616,6 @@ static const VMStateDescription vmstate_macfb = {
     .name = "macfb",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .post_load = macfb_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_UINT8_ARRAY(color_palette, MacfbState, 256 * 3),
@@ -661,9 +660,9 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
 
     memory_region_init_ram(&s->mem_vram, OBJECT(dev), "macfb-vram",
                            MACFB_VRAM_SIZE, &error_abort);
+    memory_region_set_log(&s->mem_vram, true, DIRTY_MEMORY_VGA);
     s->vram = memory_region_get_ram_ptr(&s->mem_vram);
     s->vram_bit_mask = MACFB_VRAM_SIZE - 1;
-    memory_region_set_coalescing(&s->mem_vram);
 
     s->vbl_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, macfb_vbl_timer, s);
     macfb_update_mode(s);
