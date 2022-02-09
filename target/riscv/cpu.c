@@ -172,6 +172,7 @@ static void rv64_rivos_sentinel_cpu_init(Object *obj)
     set_misa(env, MXL_RV64, RVI | RVM | RVA | RVF | RVD | RVC | RVV |
                             RVH | RVS | RVU);
     set_priv_version(env, PRIV_VERSION_1_11_0);
+    qdev_prop_set_bit(DEVICE(obj), "v", true);
 }
 
 static void rv64_sifive_u_cpu_init(Object *obj)
