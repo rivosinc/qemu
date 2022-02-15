@@ -78,6 +78,8 @@ typedef struct {
     uint64_t tag_mask;
     uint64_t accesses;
     uint64_t misses;
+    uint64_t iaccesses;         /* Just for the L2 instance */
+    uint64_t imisses;           /* Just for the L2 instance */
 } Cache;
 
 typedef struct {
@@ -110,8 +112,10 @@ static uint64_t l1_imem_accesses;
 static uint64_t l1_imisses;
 static uint64_t l1_dmisses;
 
-static uint64_t l2_mem_accesses;
-static uint64_t l2_misses;
+static uint64_t l2_imem_accesses;
+static uint64_t l2_dmem_accesses;
+static uint64_t l2_imisses;
+static uint64_t l2_dmisses;
 
 static int pow_of_two(int num)
 {
@@ -266,6 +270,8 @@ static Cache *cache_init(int blksize, int assoc, int cachesize)
     cache->blksize_shift = pow_of_two(blksize);
     cache->accesses = 0;
     cache->misses = 0;
+    cache->iaccesses = 0;
+    cache->imisses = 0;
 
     for (i = 0; i < cache->num_sets; i++) {
         cache->sets[i].blocks = g_new0(CacheBlock, assoc);
@@ -456,9 +462,9 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
     if (!access_cache(l2_ucaches[cache_idx], insn_addr)) {
         insn = (InsnData *) userdata;
         __atomic_fetch_add(&insn->l2_misses, 1, __ATOMIC_SEQ_CST);
-        l2_ucaches[cache_idx]->misses++;
+        l2_ucaches[cache_idx]->imisses++;
     }
-    l2_ucaches[cache_idx]->accesses++;
+    l2_ucaches[cache_idx]->iaccesses++;
     g_mutex_unlock(&l2_ucache_locks[cache_idx]);
 }
 
@@ -577,8 +583,10 @@ static void sum_stats(void)
         l1_dmem_accesses += l1_dcaches[i]->accesses;
 
         if (use_l2) {
-            l2_misses += l2_ucaches[i]->misses;
-            l2_mem_accesses += l2_ucaches[i]->accesses;
+            l2_imisses += l2_ucaches[i]->imisses;
+            l2_dmisses += l2_ucaches[i]->misses;
+            l2_imem_accesses += l2_ucaches[i]->iaccesses;
+            l2_dmem_accesses += l2_ucaches[i]->accesses;
         }
     }
 }
@@ -629,8 +637,8 @@ static void log_stats(void)
         l2_cache = use_l2 ? l2_ucaches[i] : NULL;
         append_stats_line(rep, dcache->accesses, dcache->misses,
                 icache->accesses, icache->misses,
-                l2_cache ? l2_cache->accesses : 0,
-                l2_cache ? l2_cache->misses : 0);
+                l2_cache ? (l2_cache->accesses+l2_cache->iaccesses) : 0,
+                l2_cache ? (l2_cache->misses+l2_cache->imisses) : 0);
     }
 
     if (cores > 1) {
@@ -638,7 +646,7 @@ static void log_stats(void)
         g_string_append_printf(rep, "%-8s", "sum");
         append_stats_line(rep, l1_dmem_accesses, l1_dmisses,
                 l1_imem_accesses, l1_imisses,
-                l2_cache ? l2_mem_accesses : 0, l2_cache ? l2_misses : 0);
+                l2_cache ? (l2_imem_accesses+l2_dmem_accesses) : 0, l2_cache ? (l2_imisses+l2_dmisses) : 0);
     }
 
     g_string_append(rep, "\n");
