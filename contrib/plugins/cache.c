@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <glib.h>
+#include <zlib.h>
 
 #include <qemu-plugin.h>
 
@@ -16,6 +17,13 @@
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static enum qemu_plugin_mem_rw rw = QEMU_PLUGIN_MEM_RW;
+
+static gzFile stats_file = Z_NULL;
+static uint64_t intv_length = 200000000;
+static uint64_t interval = 0;
+static uint64_t drift = 0;
+static uint64_t total_insns = 0;
+static uint64_t cur_insns = 0;
 
 static GHashTable *miss_ht;
 
@@ -468,6 +476,57 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
     g_mutex_unlock(&l2_ucache_locks[cache_idx]);
 }
 
+static void log_interval_stats(void)
+{
+    if (interval > 0) {
+        gzprintf(stats_file, ",\n");
+    }
+    gzprintf(stats_file, "        {\n");
+    gzprintf(stats_file, "            \"index\" : %" PRIu64 ", \"len\" : %" PRIu64 ", \"icount\" : %" PRIu64 ", \"stats\" : {\n",
+             interval, cur_insns, total_insns);
+    // Not bothering with multi-core summation
+    const unsigned i = 0;
+    if (use_l2) {
+        gzprintf(stats_file, "                \"l2-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l2_ucaches[i]->iaccesses, l2_ucaches[i]->imisses);
+        gzprintf(stats_file, "                \"l2-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l2_ucaches[i]->accesses, l2_ucaches[i]->misses);
+        l2_imisses += l2_ucaches[i]->imisses;
+        l2_dmisses += l2_ucaches[i]->misses;
+        l2_imem_accesses += l2_ucaches[i]->iaccesses;
+        l2_dmem_accesses += l2_ucaches[i]->accesses;
+        l2_ucaches[i]->misses = l2_ucaches[i]->imisses = l2_ucaches[i]->accesses = l2_ucaches[i]->iaccesses = 0;
+    }
+    gzprintf(stats_file, "                \"l1-inst\" : "
+             "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+             l1_icaches[i]->accesses, l1_icaches[i]->misses);
+    l1_imisses += l1_icaches[i]->misses;
+    l1_imem_accesses += l1_icaches[i]->accesses;
+    l1_icaches[i]->misses = l1_icaches[i]->accesses = 0;
+    gzprintf(stats_file, "                \"l1-data\" : "
+             "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "}\n",
+             l1_dcaches[i]->accesses, l1_dcaches[i]->misses);
+    l1_dmisses += l1_dcaches[i]->misses;
+    l1_dmem_accesses += l1_dcaches[i]->accesses;
+    l1_dcaches[i]->misses = l1_dcaches[i]->accesses = 0;
+    gzprintf(stats_file, "            }\n        }");
+
+    total_insns += cur_insns;
+    cur_insns = 0;
+    interval++;
+}
+
+static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
+{
+    if (cur_insns + drift < intv_length) {
+        return;
+    }
+
+    drift = (cur_insns + drift) - intv_length;
+
+    log_interval_stats();
+}
+
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 {
     size_t n_insns;
@@ -508,6 +567,14 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 
         qemu_plugin_register_vcpu_insn_exec_cb(insn, vcpu_insn_exec,
                                                QEMU_PLUGIN_CB_NO_REGS, data);
+    }
+
+    if (stats_file != Z_NULL) {
+        qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_tb_exec,
+                                             QEMU_PLUGIN_CB_NO_REGS,
+                                             (void *)n_insns);
+        qemu_plugin_register_vcpu_tb_exec_inline(tb, QEMU_PLUGIN_INLINE_ADD_U64,
+                                                 &cur_insns, n_insns);
     }
 }
 
@@ -705,14 +772,33 @@ static void log_top_insns(void)
     }
 
 finish:
-    qemu_plugin_outs(rep->str);
+    if (stats_file == Z_NULL) {
+        qemu_plugin_outs(rep->str);
+    }
     g_list_free(miss_insns);
 }
 
 static void plugin_exit(qemu_plugin_id_t id, void *p)
 {
-    log_stats();
-    log_top_insns();
+    if (stats_file == Z_NULL) {
+        log_stats();
+        log_top_insns();
+    } else {
+        log_interval_stats();
+        gzprintf(stats_file, "\n    ],\n    \"instructions\" : %" PRIu64 ",\n    \"stats\" : {\n", total_insns);
+        if (use_l2) {
+            gzprintf(stats_file, "                \"l2-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l2_imem_accesses, l2_imisses);
+            gzprintf(stats_file, "                \"l2-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l2_dmem_accesses, l2_dmisses);
+        }
+        gzprintf(stats_file, "        \"l1-inst\" : "
+                 "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n", l1_imem_accesses, l1_imisses);
+        gzprintf(stats_file, "        \"l1-data\" : "
+                 "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "}\n", l1_dmem_accesses, l1_dmisses);
+        gzprintf(stats_file, "    }\n}\n");
+        gzclose_w(stats_file);
+    }
 
     caches_free(l1_dcaches);
     caches_free(l1_icaches);
@@ -747,6 +833,16 @@ static void policy_init(void)
         break;
     default:
         g_assert_not_reached();
+    }
+}
+
+static const char *policy_string(enum EvictionPolicy p)
+{
+    switch (p) {
+    default:
+    case LRU: return "LRU";
+    case RAND: return "RAND";
+    case FIFO: return "FIFO";
     }
 }
 
@@ -823,6 +919,13 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                 fprintf(stderr, "invalid eviction policy: %s\n", opt);
                 return -1;
             }
+        } else if (g_strcmp0(tokens[0], "stats") == 0) {
+            stats_file = gzopen(tokens[1], "wb9");
+            if (stats_file == Z_NULL) {
+                return -1;
+            }
+        } else if (g_strcmp0(tokens[0], "ilen") == 0) {
+            intv_length = strtoull(tokens[1], NULL, 0);
         } else {
             fprintf(stderr, "option parsing failed: %s\n", opt);
             return -1;
@@ -858,6 +961,23 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
     l1_dcache_locks = g_new0(GMutex, cores);
     l1_icache_locks = g_new0(GMutex, cores);
     l2_ucache_locks = use_l2 ? g_new0(GMutex, cores) : NULL;
+
+    if (stats_file != Z_NULL) {
+        if (cores > 1) {
+            fprintf(stderr, "Cache \"stats\" mode only supports a single core\n");
+            return -1;
+        }
+        gzprintf(stats_file, "{\n    \"config\" : {\n        \"policy\" : \"%s\",\n", policy_string(policy));
+        if (use_l2) {
+            gzprintf(stats_file, "        \"l2\" :          { \"assoc\": %u, \"blksize\": %u, \"size\": %u},\n",
+                     l2_assoc, l2_blksize, l2_cachesize);
+        }
+            gzprintf(stats_file, "        \"l1-inst\" :     { \"assoc\": %u, \"blksize\": %u, \"size\": %u},\n",
+                     l1_iassoc, l1_iblksize, l1_icachesize);
+            gzprintf(stats_file, "        \"l1-data\" :     { \"assoc\": %u, \"blksize\": %u, \"size\": %u}\n",
+                     l1_dassoc, l1_dblksize, l1_dcachesize);
+        gzprintf(stats_file, "    },\n    \"intervals\": [\n");
+    }
 
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
