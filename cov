@@ -1,0 +1,43 @@
+This series implements Sstc extension[1] which was ratified recently.
+
+The first patch is a prepartory patches while PATCH 2 adds stimecmp
+support while PATCH 3 adds vstimecmp support. This series is based on
+on top of upstream commit (faee5441a038).
+
+The series can also be found at
+https://github.com/atishp04/qemu/tree/sstc_v7
+
+It is tested on RV32 & RV64 with latest OpenSBI & Linux kernel[2]
+patches.
+
+Changes from v6->v7:
+1. Replaced g_malloc0 with g_new0.
+2. Removed the over allocation for the timers.
+
+Changes from v5->v6:
+1. Rebased on top of the latest HEAD commit.
+
+Changes from v4->v5:
+1. Removed any ordering related flags and emulate the hardware more
+   closely. 
+
+Changes from v3->v4:
+1. Added [v]stimecmp_wr_done to the corresponding vmstate strucuture.
+
+Changes from v2->v3:
+1. Dropped generic migration code improvement patches.
+2. Removed the order constraints while updating stimecmp/vstimecmp.
+
+Changes from v1->v2:
+1. Rebased on the latest upstream commit.
+2. Replaced PATCH 1 with another patch where mtimer/timecmp is
+   moved from CPU to ACLINT.
+3. Added ACLINT migration support.
+
+[1] https://drive.google.com/file/d/1m84Re2yK8m_vbW7TspvevCDR82MOBaSX/view
+[2] https://github.com/atishp04/linux/tree/sstc_v7
+
+To: qemu-devel@nongnu.org
+
+option-subject Implement Sstc extension 
+option-prefix PATCH v7 
