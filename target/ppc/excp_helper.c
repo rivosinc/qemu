@@ -18,6 +18,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu/log.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
 #include "internal.h"
@@ -360,10 +361,19 @@ static void ppc_excp_apply_ail(PowerPCCPU *cpu, int excp, target_ulong msr,
 }
 #endif
 
-static void powerpc_set_excp_state(PowerPCCPU *cpu,
-                                          target_ulong vector, target_ulong msr)
+static void powerpc_reset_excp_state(PowerPCCPU *cpu)
 {
     CPUState *cs = CPU(cpu);
+    CPUPPCState *env = &cpu->env;
+
+    /* Reset exception state */
+    cs->exception_index = POWERPC_EXCP_NONE;
+    env->error_code = 0;
+}
+
+static void powerpc_set_excp_state(PowerPCCPU *cpu, target_ulong vector,
+                                   target_ulong msr)
+{
     CPUPPCState *env = &cpu->env;
 
     assert((msr & env->msr_mask) == msr);
@@ -376,21 +386,20 @@ static void powerpc_set_excp_state(PowerPCCPU *cpu,
      * will prevent setting of the HV bit which some exceptions might need
      * to do.
      */
+    env->nip = vector;
     env->msr = msr;
     hreg_compute_hflags(env);
-    env->nip = vector;
-    /* Reset exception state */
-    cs->exception_index = POWERPC_EXCP_NONE;
-    env->error_code = 0;
 
-    /* Reset the reservation */
-    env->reserve_addr = -1;
+    powerpc_reset_excp_state(cpu);
 
     /*
      * Any interrupt is context synchronizing, check if TCG TLB needs
      * a delayed flush on ppc64
      */
     check_tlb_flush(env, false);
+
+    /* Reset the reservation */
+    env->reserve_addr = -1;
 }
 
 static void powerpc_excp_40x(PowerPCCPU *cpu, int excp)
@@ -471,8 +480,7 @@ static void powerpc_excp_40x(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
             env->spr[SPR_40x_ESR] = ESR_FP;
@@ -609,8 +617,7 @@ static void powerpc_excp_6xx(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
 
@@ -783,8 +790,7 @@ static void powerpc_excp_7xx(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
 
@@ -969,8 +975,7 @@ static void powerpc_excp_74xx(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
 
@@ -1168,8 +1173,7 @@ static void powerpc_excp_booke(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
 
@@ -1277,7 +1281,45 @@ static void powerpc_excp_booke(PowerPCCPU *cpu, int excp)
     powerpc_set_excp_state(cpu, vector, new_msr);
 }
 
+/*
+ * When running a nested HV guest under vhyp, external interrupts are
+ * delivered as HVIRT.
+ */
+static bool books_vhyp_promotes_external_to_hvirt(PowerPCCPU *cpu)
+{
+    if (cpu->vhyp) {
+        return vhyp_cpu_in_nested(cpu);
+    }
+    return false;
+}
+
 #ifdef TARGET_PPC64
+/*
+ * When running under vhyp, hcalls are always intercepted and sent to the
+ * vhc->hypercall handler.
+ */
+static bool books_vhyp_handles_hcall(PowerPCCPU *cpu)
+{
+    if (cpu->vhyp) {
+        return !vhyp_cpu_in_nested(cpu);
+    }
+    return false;
+}
+
+/*
+ * When running a nested KVM HV guest under vhyp, HV exceptions are not
+ * delivered to the guest (because there is no concept of HV support), but
+ * rather they are sent tothe vhyp to exit from the L2 back to the L1 and
+ * return from the H_ENTER_NESTED hypercall.
+ */
+static bool books_vhyp_handles_hv_excp(PowerPCCPU *cpu)
+{
+    if (cpu->vhyp) {
+        return vhyp_cpu_in_nested(cpu);
+    }
+    return false;
+}
+
 static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
 {
     CPUState *cs = CPU(cpu);
@@ -1394,8 +1436,7 @@ static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
         case POWERPC_EXCP_FP:
             if ((msr_fe0 == 0 && msr_fe1 == 0) || msr_fp == 0) {
                 trace_ppc_excp_fp_ignore();
-                cs->exception_index = POWERPC_EXCP_NONE;
-                env->error_code = 0;
+                powerpc_reset_excp_state(cpu);
                 return;
             }
 
@@ -1439,7 +1480,7 @@ static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
         env->nip += 4;
 
         /* "PAPR mode" built-in hypercall emulation */
-        if ((lev == 1) && cpu->vhyp) {
+        if ((lev == 1) && books_vhyp_handles_hcall(cpu)) {
             PPCVirtualHypervisorClass *vhc =
                 PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
             vhc->hypercall(cpu->vhyp, cpu);
@@ -1513,6 +1554,21 @@ static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
         new_msr |= (target_ulong)MSR_HVB;
         new_msr |= env->msr & ((target_ulong)1 << MSR_RI);
         break;
+    case POWERPC_EXCP_PERFM_EBB:        /* Performance Monitor EBB Exception  */
+    case POWERPC_EXCP_EXTERNAL_EBB:     /* External EBB Exception             */
+        env->spr[SPR_BESCR] &= ~BESCR_GE;
+
+        /*
+         * Save NIP for rfebb insn in SPR_EBBRR. Next nip is
+         * stored in the EBB Handler SPR_EBBHR.
+         */
+        env->spr[SPR_EBBRR] = env->nip;
+        powerpc_set_excp_state(cpu, env->spr[SPR_EBBHR], env->msr);
+
+        /*
+         * This exception is handled in userspace. No need to proceed.
+         */
+        return;
     case POWERPC_EXCP_THERM:     /* Thermal interrupt                        */
     case POWERPC_EXCP_PERFM:     /* Embedded performance monitor interrupt   */
     case POWERPC_EXCP_VPUA:      /* Vector assist exception                  */
@@ -1525,12 +1581,6 @@ static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
     default:
         cpu_abort(cs, "Invalid PowerPC exception %d. Aborting\n", excp);
         break;
-    }
-
-    /* Sanity check */
-    if (!(env->msr_mask & MSR_HVB) && srr0 == SPR_HSRR0) {
-        cpu_abort(cs, "Trying to deliver HV exception (HSRR) %d with "
-                  "no HV support\n", excp);
     }
 
     /*
@@ -1551,10 +1601,26 @@ static void powerpc_excp_books(PowerPCCPU *cpu, int excp)
         env->spr[srr1] = msr;
     }
 
-    /* This can update new_msr and vector if AIL applies */
-    ppc_excp_apply_ail(cpu, excp, msr, &new_msr, &vector);
+    if ((new_msr & MSR_HVB) && books_vhyp_handles_hv_excp(cpu)) {
+        PPCVirtualHypervisorClass *vhc =
+            PPC_VIRTUAL_HYPERVISOR_GET_CLASS(cpu->vhyp);
+        /* Deliver interrupt to L1 by returning from the H_ENTER_NESTED call */
+        vhc->deliver_hv_excp(cpu, excp);
 
-    powerpc_set_excp_state(cpu, vector, new_msr);
+        powerpc_reset_excp_state(cpu);
+
+    } else {
+        /* Sanity check */
+        if (!(env->msr_mask & MSR_HVB) && srr0 == SPR_HSRR0) {
+            cpu_abort(cs, "Trying to deliver HV exception (HSRR) %d with "
+                      "no HV support\n", excp);
+        }
+
+        /* This can update new_msr and vector if AIL applies */
+        ppc_excp_apply_ail(cpu, excp, msr, &new_msr, &vector);
+
+        powerpc_set_excp_state(cpu, vector, new_msr);
+    }
 }
 #else
 static inline void powerpc_excp_books(PowerPCCPU *cpu, int excp)
@@ -1674,7 +1740,11 @@ static void ppc_hw_interrupt(CPUPPCState *env)
         /* HEIC blocks delivery to the hypervisor */
         if ((async_deliver && !(heic && msr_hv && !msr_pr)) ||
             (env->has_hv_mode && msr_hv == 0 && !lpes0)) {
-            powerpc_excp(cpu, POWERPC_EXCP_EXTERNAL);
+            if (books_vhyp_promotes_external_to_hvirt(cpu)) {
+                powerpc_excp(cpu, POWERPC_EXCP_HVIRT);
+            } else {
+                powerpc_excp(cpu, POWERPC_EXCP_EXTERNAL);
+            }
             return;
         }
     }
@@ -1742,6 +1812,24 @@ static void ppc_hw_interrupt(CPUPPCState *env)
             powerpc_excp(cpu, POWERPC_EXCP_THERM);
             return;
         }
+        /* EBB exception */
+        if (env->pending_interrupts & (1 << PPC_INTERRUPT_EBB)) {
+            /*
+             * EBB exception must be taken in problem state and
+             * with BESCR_GE set.
+             */
+            if (msr_pr == 1 && env->spr[SPR_BESCR] & BESCR_GE) {
+                env->pending_interrupts &= ~(1 << PPC_INTERRUPT_EBB);
+
+                if (env->spr[SPR_BESCR] & BESCR_PMEO) {
+                    powerpc_excp(cpu, POWERPC_EXCP_PERFM_EBB);
+                } else if (env->spr[SPR_BESCR] & BESCR_EEO) {
+                    powerpc_excp(cpu, POWERPC_EXCP_EXTERNAL_EBB);
+                }
+
+                return;
+            }
+        }
     }
 
     if (env->resume_as_sreset) {
@@ -1783,6 +1871,8 @@ void ppc_cpu_do_fwnmi_machine_check(CPUState *cs, target_ulong vector)
     if (ppc_interrupts_little_endian(cpu, false)) {
         msr |= (1ULL << MSR_LE);
     }
+
+    /* Anything for nested required here? MSR[HV] bit? */
 
     powerpc_set_excp_state(cpu, vector, msr);
 }
@@ -1975,6 +2065,54 @@ void helper_rfebb(CPUPPCState *env, target_ulong s)
     } else {
         env->spr[SPR_BESCR] &= ~BESCR_GE;
     }
+}
+
+/*
+ * Triggers or queues an 'ebb_excp' EBB exception. All checks
+ * but FSCR, HFSCR and msr_pr must be done beforehand.
+ *
+ * PowerISA v3.1 isn't clear about whether an EBB should be
+ * postponed or cancelled if the EBB facility is unavailable.
+ * Our assumption here is that the EBB is cancelled if both
+ * FSCR and HFSCR EBB facilities aren't available.
+ */
+static void do_ebb(CPUPPCState *env, int ebb_excp)
+{
+    PowerPCCPU *cpu = env_archcpu(env);
+    CPUState *cs = CPU(cpu);
+
+    /*
+     * FSCR_EBB and FSCR_IC_EBB are the same bits used with
+     * HFSCR.
+     */
+    helper_fscr_facility_check(env, FSCR_EBB, 0, FSCR_IC_EBB);
+    helper_hfscr_facility_check(env, FSCR_EBB, "EBB", FSCR_IC_EBB);
+
+    if (ebb_excp == POWERPC_EXCP_PERFM_EBB) {
+        env->spr[SPR_BESCR] |= BESCR_PMEO;
+    } else if (ebb_excp == POWERPC_EXCP_EXTERNAL_EBB) {
+        env->spr[SPR_BESCR] |= BESCR_EEO;
+    }
+
+    if (msr_pr == 1) {
+        powerpc_excp(cpu, ebb_excp);
+    } else {
+        env->pending_interrupts |= 1 << PPC_INTERRUPT_EBB;
+        cpu_interrupt(cs, CPU_INTERRUPT_HARD);
+    }
+}
+
+void raise_ebb_perfm_exception(CPUPPCState *env)
+{
+    bool perfm_ebb_enabled = env->spr[SPR_POWER_MMCR0] & MMCR0_EBE &&
+                             env->spr[SPR_BESCR] & BESCR_PME &&
+                             env->spr[SPR_BESCR] & BESCR_GE;
+
+    if (!perfm_ebb_enabled) {
+        return;
+    }
+
+    do_ebb(env, POWERPC_EXCP_PERFM_EBB);
 }
 #endif
 
