@@ -168,6 +168,7 @@ static void rv64_rivos_sentinel_cpu_init(Object *obj)
                             RVH | RVS | RVU);
     set_priv_version(env, PRIV_VERSION_1_11_0);
     qdev_prop_set_bit(DEVICE(obj), "v", true);
+    qdev_prop_set_uint16(DEVICE(obj), "vlen", 256);
 }
 
 static void rv64_sifive_u_cpu_init(Object *obj)
