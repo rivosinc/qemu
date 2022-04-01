@@ -275,7 +275,21 @@ static int aia_any32(CPURISCVState *env, int csrno)
 
 static int smode_tee(CPURISCVState *env, int csrno)
 {
-    if (!riscv_cpu_tee_enabled(env) || (env->priv != PRV_S)) {
+    /* Since many predicates are about feature existence, Rcode
+     * shouldn't short-circuit predicate checks. This is the rare
+     * case where pretending to be in PRV_M actually causes a
+     * privilege check to fail - so we explicitly handle Rcode. */
+    if (!riscv_cpu_rcode_enabled(env) &&
+        (!riscv_cpu_tee_enabled(env) || (env->priv != PRV_S))) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    return any(env, csrno);
+}
+
+static int rcode(CPURISCVState *env, int csrno)
+{
+    if (!riscv_cpu_rcode_enabled(env)) {
         return RISCV_EXCP_ILLEGAL_INST;
     }
 
@@ -627,6 +641,202 @@ static RISCVException write_mttp(CPURISCVState *env, int csrno,
     /* Any change to the MTTP necessitates a TLB flush */
     tlb_flush(env_cpu(env));
 
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_mpteppn(CPURISCVState *env, int csrno,
+                                   target_ulong *val)
+{
+    *val = env->mpteppn;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_mpteppn(CPURISCVState *env, int csrno,
+                                    target_ulong val)
+{
+    env->mpteppn = val;
+    return RISCV_EXCP_NONE;
+}
+
+/* R-code registers */
+static RISCVException read_rmode(CPURISCVState *env, int csrno,
+                                 target_ulong *val)
+{
+    assert(env->rmode & RMODE_INRCODE); /* It is not OK to find !inRcode */
+
+    uint64_t rmode = RMODE_INRCODE;
+    /* The Priv, V, and TEE fields always reflect the current mode */
+    rmode = set_field(env->rmode, RMODE_PRIV, env->priv);
+    rmode = set_field(rmode, RMODE_V, riscv_cpu_virt_enabled(env) ? 1 : 0);
+    rmode = set_field(rmode, RMODE_TEEMODE, riscv_cpu_tee_enabled(env) ? 1 : 0);
+    *val = rmode;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rmode(CPURISCVState *env, int csrno,
+                                  target_ulong val)
+{
+    val &= RMODE_INRCODE | RMODE_TEEMODE | RMODE_V | RMODE_PRIV;
+
+    /*
+     * The Priv, V, and TEE fields take immediate effect. Blow up if
+     * inRcode is being cleared - that's not OK.
+     */
+    assert(val & RMODE_INRCODE);
+
+    const bool v_changing = ((env->rmode ^ val) & RMODE_V);
+    if (riscv_has_ext(env, RVH) && v_changing) {
+        /* Any change to V requires a swap call before updating env */
+        riscv_cpu_swap_hypervisor_regs(env);
+        riscv_cpu_set_virt_enabled(env, val & RMODE_V);
+    }
+
+    riscv_cpu_set_mode(env, get_field(val, RMODE_PRIV));
+    riscv_cpu_set_tee_enabled(env, val & RMODE_TEEMODE);
+    env->rmode = val;
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rtvec(CPURISCVState *env, int csrno,
+                                 target_ulong *val)
+{
+    *val = env->rtvec;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rtvec(CPURISCVState *env, int csrno,
+                                  target_ulong val)
+{
+    env->rtvec = val & RTVEC_ALIGNMENT;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_repc(CPURISCVState *env, int csrno,
+                                target_ulong *val)
+{
+    *val = env->repc;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_repc(CPURISCVState *env, int csrno,
+                                 target_ulong val)
+{
+    env->repc = val;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rscratch(CPURISCVState *env, int csrno,
+                                    target_ulong *val)
+{
+    *val = env->rscratch;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rscratch(CPURISCVState *env, int csrno,
+                                     target_ulong val)
+{
+    env->rscratch = val;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rcode_irange(CPURISCVState *env, int csrno,
+                                        target_ulong *val)
+{
+    *val = env->rcode_irange;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rcode_irange(CPURISCVState *env, int csrno,
+                                         target_ulong val)
+{
+    env->rcode_irange = (val & env_archcpu(env)->cfg.pa_mask &
+                         RCODE_IRANGE_BASE);
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rcode_drange(CPURISCVState *env, int csrno,
+                                        target_ulong *val)
+{
+    *val = env->rcode_drange;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rcode_drange(CPURISCVState *env, int csrno,
+                                  target_ulong val)
+{
+    env->rcode_drange = val & ((env_archcpu(env)->cfg.pa_mask &
+                                RCODE_DRANGE_BASE) |
+                               RCODE_DRANGE_VALID);
+    /* The RRAM carveout is derived from the programming of rcode_drange
+     * when it is valid. */
+    /* FIXME: wait.... now this should come from the resetvec setup? */
+    if (val & RCODE_DRANGE_VALID) {
+        env->rcode_ram_base = env->rcode_drange &
+            env_archcpu(env)->cfg.rcode_ram_mask;
+    } else {
+        /*
+         * When drange is invalid, the masked address check should always
+         * fail - to allow non-R-code accesses, as per the spec.
+         */
+        env->rcode_ram_base = ~env_archcpu(env)->cfg.rcode_ram_mask;
+    }
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_trcm(CPURISCVState *env, int csrno,
+                                target_ulong *val)
+{
+    *val = env->trcm;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_trcm(CPURISCVState *env, int csrno,
+                                 target_ulong val)
+{
+    env->trcm = val;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_trcs(CPURISCVState *env, int csrno,
+                                target_ulong *val)
+{
+    *val = env->trcs;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_trcs(CPURISCVState *env, int csrno,
+                                 target_ulong val)
+{
+    env->trcs = val;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rintercept(CPURISCVState *env, int csrno,
+                                      target_ulong *val)
+{
+    *val = env->rintercept;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rintercept(CPURISCVState *env, int csrno,
+                                       target_ulong val)
+{
+    env->rintercept = val & (RINTERCEPT_IU | RINTERCEPT_IS);
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_rcsrint(CPURISCVState *env, int csrno,
+                                   target_ulong *val)
+{
+    *val = env->rcsrint[csrno - CSR_RCSRINT0];
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_rcsrint(CPURISCVState *env, int csrno,
+                                    target_ulong val)
+{
+    env->rcsrint[csrno - CSR_RCSRINT0] = val;
     return RISCV_EXCP_NONE;
 }
 #endif
@@ -3311,6 +3521,22 @@ static inline RISCVException riscv_csrrw_check(CPURISCVState *env,
         effective_priv++;
     }
 
+    if (riscv_feature(env, RISCV_FEATURE_RCODE)) {
+        if (riscv_cpu_rcode_enabled(env)) {
+            /* When in R-code, all CSRs are accessible */
+            effective_priv  = PRV_M;
+        } else {
+            /* Check for CSR access intercept; no harm in doing it before
+             * any other checks. R-code will have a chance to emulate the
+             * CSR access by intercepting this illegal inst trap. */
+            int reg = get_field(csrno, 0x0C0);
+            uint64_t bit = 1ULL << get_field(csrno, 0x3F);
+            if (env->rcsrint[reg] & bit) {
+                return RISCV_EXCP_ILLEGAL_INST;
+            }
+        }
+    }
+
     csr_priv = get_field(csrno, 0x300);
     if (!env->debugger && (effective_priv < csr_priv)) {
         if (csr_priv == (PRV_S + 1) && riscv_cpu_virt_enabled(env)) {
@@ -3745,6 +3971,23 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
 
     /* TEE */
     [CSR_MTTP] =       { "mttp",    smode_tee, read_mttp,    write_mttp },
+    [CSR_MPTEPPN] =    { "mpteppn", rcode,     read_mpteppn, write_mpteppn },
+
+    /* Rcode */
+    [CSR_RSCRATCH]     = { "rscratch",     rcode, read_rscratch,     write_rscratch },
+    [CSR_REPC]         = { "repc",         rcode, read_repc,         write_repc },
+    [CSR_RMODE]        = { "rmode",        rcode, read_rmode,        write_rmode },
+    [CSR_RTVEC]        = { "rtvec",        rcode, read_rtvec,        write_rtvec },
+    [CSR_RCODE_IRANGE] = { "rcode_irange", rcode, read_rcode_irange, write_rcode_irange },
+    [CSR_RCODE_DRANGE] = { "rcode_drange", rcode, read_rcode_drange, write_rcode_drange },
+    [CSR_RTVEC]        = { "rtvec",        rcode, read_rtvec,        write_rtvec },
+    [CSR_RTRCM]        = { "rtrcm",        rcode, read_trcm,         write_trcm },
+    [CSR_RTRCS]        = { "rtrcs",        rcode, read_trcs,         write_trcs },
+    [CSR_RINTERCEPT]   = { "rintercept",   rcode, read_rintercept,   write_rintercept },
+    [CSR_RCSRINT0]     = { "rcsrint0",     rcode, read_rcsrint,      write_rcsrint },
+    [CSR_RCSRINT1]     = { "rcsrint1",     rcode, read_rcsrint,      write_rcsrint },
+    [CSR_RCSRINT2]     = { "rcsrint2",     rcode, read_rcsrint,      write_rcsrint },
+    [CSR_RCSRINT3]     = { "rcsrint3",     rcode, read_rcsrint,      write_rcsrint },
 
     /* Performance Counters */
     [CSR_HPMCOUNTER3]    = { "hpmcounter3",    ctr,    read_hpmcounter },

@@ -5,6 +5,7 @@ gen = [
   decodetree.process('insn16.decode', extra_args: ['--static-decode=decode_insn16', '--insnwidth=16']),
   decodetree.process('insn32.decode', extra_args: '--static-decode=decode_insn32'),
   decodetree.process('XVentanaCondOps.decode', extra_args: '--static-decode=decode_XVentanaCodeOps'),
+  decodetree.process('XRivosRcode.decode', extra_args: '--static-decode=decode_XRivosRcode'),
 ]
 
 riscv_ss = ss.source_set()

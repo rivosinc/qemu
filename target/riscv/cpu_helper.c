@@ -31,7 +31,7 @@ int riscv_cpu_mmu_index(CPURISCVState *env, bool ifetch)
 #ifdef CONFIG_USER_ONLY
     return 0;
 #else
-    return env->priv;
+    return (riscv_cpu_rcode_enabled(env) && ifetch) ? MMU_RCODE_IDX : env->priv;
 #endif
 }
 
@@ -97,6 +97,10 @@ void cpu_get_tb_cpu_state(CPURISCVState *env, target_ulong *pc,
 
         flags = FIELD_DP32(flags, TB_FLAGS, MSTATUS_HS_VS,
                            get_field(env->mstatus_hs, MSTATUS_VS));
+    }
+
+    if (riscv_cpu_rcode_enabled(env)) {
+        flags = FIELD_DP32(flags, TB_FLAGS, IN_RCODE, 1);
     }
 #endif
 
@@ -569,6 +573,39 @@ void riscv_cpu_set_tee_enabled(CPURISCVState *env, bool enable)
     env->tee = set_field(env->tee, TEE_ONOFF, enable);
 }
 
+bool riscv_cpu_rcode_enabled(CPURISCVState *env)
+{
+    if (!riscv_feature(env, RISCV_FEATURE_RCODE)) {
+        return false;
+    }
+
+    return get_field(env->rmode, RMODE_INRCODE);
+}
+
+void riscv_cpu_set_rcode_enabled(CPURISCVState *env, bool enable)
+{
+    if (!riscv_feature(env, RISCV_FEATURE_RCODE)) {
+        return;
+    }
+
+    /*
+     * While in R-code, normal load and store instructions continue to
+     * behave according to the processor's current priv/v setting. Fetches
+     * and R-code data access instructions use a dedicated MMU index. No
+     * TLB flush is required on transitions.
+     */
+    env->rmode = set_field(env->rmode, RMODE_INRCODE, enable ? 1 : 0);
+
+    /*
+     * Interrupt delivery is masked during R-code execution, so on the way
+     * out of R-code, the CPU should re-evaluate pending interrupts in the
+     * current privilege mode. It may be overkill to do it on the way in,
+     * but it doesn't hurt - and might squash an interrupt that's already
+     * pending (?)
+     */
+    riscv_cpu_update_mip(env_archcpu(env), 0, 0);
+}
+
 bool riscv_cpu_virt_enabled(CPURISCVState *env)
 {
     if (!riscv_has_ext(env, RVH)) {
@@ -640,7 +677,9 @@ uint64_t riscv_cpu_update_mip(RISCVCPU *cpu, uint64_t mask, uint64_t value)
 
     env->mip = (env->mip & ~mask) | (value & mask);
 
-    if (env->mip | vsgein) {
+    /* Interrupt delivery is suppressed while R-code is running, but
+     * MIP must be kept up to date. */
+    if ((env->mip | vsgein) && !riscv_cpu_rcode_enabled(env)) {
         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
@@ -800,6 +839,14 @@ static int get_physical_address_pmp(CPURISCVState *env, int *prot,
 {
     pmp_priv_t pmp_priv;
     target_ulong tlb_size_pmp = 0;
+
+    /* TEMPORARY: do the illegal hit to Rcode SRAM here for now since it's convenient */
+    if (riscv_feature(env, RISCV_FEATURE_RCODE) && !riscv_cpu_rcode_enabled(env)) {
+        RISCVCPU *cpu = env_archcpu(env);
+        if ((addr & cpu->cfg.rcode_ram_mask) == env->rcode_ram_base) {
+            return TRANSLATE_FAIL;
+        }
+    }
 
     if (!riscv_feature(env, RISCV_FEATURE_PMP)) {
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
@@ -1267,6 +1314,49 @@ static void raise_mmu_exception(CPURISCVState *env, target_ulong address,
     env->two_stage_lookup = two_stage;
 }
 
+/*
+ * check_rcode_access - check if a fetch or RL/RS access is legal
+ *
+ * The CPU is configured by software to know where it's legal to
+ * fetch R-code from (unrestricted until enIcheck is flipped on),
+ * and where its slice of data lives (once drange.valid is set).
+ * This models the "hardwired" ITLB/DTLB entries described in the
+ * R-code spec.
+ *
+ * @env: CPURISCVState
+ * @physical: This will be set to the calculated physical address
+ * @prot: The returned protection attributes
+ * @addr: The virtual address to be translated
+ * @is_fetch: Indicates whether the access a fetch or a load/store
+ */
+static int check_rcode_access(CPURISCVState *env, hwaddr *physical,
+                              int *prot, target_ulong addr,
+                              bool is_fetch)
+{
+    /* TEMPORARY: sanity check */
+    assert(riscv_cpu_rcode_enabled(env));
+
+    bool ok;
+    if (is_fetch) {
+        /* R-code fetch is restricted based on enIfetch and the
+         * irange CSR */
+        ok = !((addr ^ env->rcode_irange) & RCODE_IRANGE_BASE);
+    } else {
+        /* R-code load and store instructions only succeed when the
+         * drange is valid and the access is within the range. */
+        ok = (get_field(env->rcode_drange, RCODE_DRANGE_VALID) &&
+              !((addr ^ env->rcode_drange) & RCODE_DRANGE_BASE));
+    }
+    if (ok) {
+        /* The mapping is 1x1 and access is strictly exec or rd/wr */
+        *physical = addr;
+        *prot = is_fetch ? PAGE_EXEC : (PAGE_READ | PAGE_WRITE);
+        return TRANSLATE_SUCCESS;
+    } else {
+        return TRANSLATE_FAIL;
+    }
+}
+
 hwaddr riscv_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
     RISCVCPU *cpu = RISCV_CPU(cs);
@@ -1274,6 +1364,18 @@ hwaddr riscv_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
     hwaddr phys_addr;
     int prot;
     int mmu_idx = cpu_mmu_index(&cpu->env, false);
+
+    if (riscv_cpu_rcode_enabled(env)) {
+        /* For debugger or disassembler access while Rcode is active,
+         * try as a fetch first but allow completion as ldst too. */
+        if (check_rcode_access(env, &phys_addr, &prot, addr, true) == TRANSLATE_SUCCESS) {
+            return phys_addr & TARGET_PAGE_MASK;
+        }
+        if (check_rcode_access(env, &phys_addr, &prot, addr, false) == TRANSLATE_SUCCESS) {
+            return phys_addr & TARGET_PAGE_MASK;
+        }
+        return -1;
+    }
 
     if (get_physical_address(env, &phys_addr, &prot, addr, NULL, 0, mmu_idx,
                              true, riscv_cpu_virt_enabled(env), true)) {
@@ -1361,6 +1463,19 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
 
     qemu_log_mask(CPU_LOG_MMU, "%s ad %" VADDR_PRIx " rw %d mmu_idx %d\n",
                   __func__, address, access_type, mmu_idx);
+
+    /* R-code accesses bypass the page walker completely, subject to
+     * specific range checks. */
+    if (mmu_idx == MMU_RCODE_IDX) {
+        const bool is_fetch = access_type == MMU_INST_FETCH;
+        ret = check_rcode_access(env, &pa, &prot, address, is_fetch);
+        if ((ret != TRANSLATE_SUCCESS) && is_fetch) {
+            /* R-code fetch failure takes a special path */
+            riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, retaddr);
+            return true;
+        }
+        goto skip_walk;
+    }
 
     /* MPRV does not affect the virtual-machine load/store
        instructions, HLV, HLVX, and HSV. */
@@ -1487,6 +1602,7 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
         }
     }
 
+skip_walk:
     if (ret == TRANSLATE_SUCCESS) {
         MemTxAttrs attrs =  MEMTXATTRS_UNSPECIFIED;
         /*
@@ -1687,6 +1803,21 @@ void riscv_cpu_do_interrupt(CPUState *cs)
      */
 
     env->two_stage_lookup = false;
+
+    if (riscv_feature(env, RISCV_FEATURE_RCODE)) {
+        /* Now that the transition is complete, evaluate whether to take
+         * the trap in R-code. Traps from R-code stay in R-code, which
+         * needs to be written to be re-entrant. */
+        uint64_t rfilter = (env->priv == PRV_M) ? env->trcm : env->trcs;
+        uint64_t filter_bit = cause | (async ? RCODE_VEC_ASYNC : 0);
+        uint64_t offset = filter_bit * 4;
+        env->repc = env->pc;            /* repc is allowed to be unconditional */
+        if (riscv_cpu_rcode_enabled(env) || (rfilter & (1ULL << filter_bit))) {
+            env->pc = env->rtvec | offset;
+            riscv_cpu_set_rcode_enabled(env, true);
+        }
+    }
+
 #endif
     cs->exception_index = RISCV_EXCP_NONE; /* mark handled to qemu */
 }

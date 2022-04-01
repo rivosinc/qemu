@@ -188,6 +188,7 @@ static void rv64_rivos_sentinel_cpu_init(Object *obj)
     cpu->cfg.vlen = 256;
     cpu->cfg.elen = 64;
     cpu->cfg.pa_mask = (1ULL << 46) - 1;
+    cpu->cfg.rcode_ram_mask = ~((1ULL << 21) - 1);
     cpu->cfg.pmp = false;
 
     /* Continue supporting command-line CPU customization for now */
@@ -503,6 +504,12 @@ static void riscv_cpu_reset(DeviceState *dev)
     }
     /* mmte is supposed to have pm.current hardwired to 1 */
     env->mmte |= (PM_EXT_INITIAL | MMTE_M_PM_CURRENT);
+
+    if (riscv_feature(env, RISCV_FEATURE_RCODE)) {
+        /* A CPU with R-code resets with inRcode asserted */
+        riscv_cpu_set_rcode_enabled(env, true);
+        env->rcode_irange = env->resetvec;
+    }
 #endif
     env->xl = riscv_cpu_mxl(env);
     riscv_cpu_update_mask(env);
@@ -601,6 +608,10 @@ static void riscv_cpu_realize(DeviceState *dev, Error **errp)
 
     if (cpu->cfg.tee) {
         riscv_set_feature(env, RISCV_FEATURE_TEE);
+    }
+
+    if (cpu->cfg.ext_XRivosRcode) {
+        riscv_set_feature(env, RISCV_FEATURE_RCODE);
     }
 
     set_resetvec(env, cpu->cfg.resetvec);
@@ -942,6 +953,8 @@ static Property riscv_cpu_extensions[] = {
 
     /* Vendor-specific custom extensions */
     DEFINE_PROP_BOOL("xventanacondops", RISCVCPU, cfg.ext_XVentanaCondOps, false),
+    /* Rivos R-code support */
+    DEFINE_PROP_BOOL("rcode", RISCVCPU, cfg.ext_XRivosRcode, false),
 
     /* These are experimental so mark with 'x-' */
     DEFINE_PROP_BOOL("x-j", RISCVCPU, cfg.ext_j, false),
@@ -975,6 +988,8 @@ static Property riscv_cpu_properties[] = {
 
     DEFINE_PROP_UINT64("pa-mask", RISCVCPU, cfg.pa_mask,
                        (1ULL << TARGET_PHYS_ADDR_SPACE_BITS) - 1),
+
+    DEFINE_PROP_UINT64("rcode-rram-mask", RISCVCPU, cfg.rcode_ram_mask, -1ULL),
 
     DEFINE_PROP_BOOL("short-isa-string", RISCVCPU, cfg.short_isa_string, false),
 

@@ -89,6 +89,7 @@ enum {
     RISCV_FEATURE_AIA,
     RISCV_FEATURE_DEBUG,
     RISCV_FEATURE_TEE,
+    RISCV_FEATURE_RCODE,
 };
 
 /* Privileged specification version */
@@ -107,6 +108,7 @@ enum {
     TRANSLATE_G_STAGE_FAIL
 };
 
+#define MMU_RCODE_IDX 2
 #define MMU_USER_IDX 3
 
 #define MAX_RISCV_PMPS (16)
@@ -264,6 +266,21 @@ struct CPUArchState {
     /* TEE support */
     target_ulong tee;
     uint64_t mttp;
+    uint64_t mpteppn;
+
+    /* R-code CSRs */
+    target_ulong rmode;
+    target_ulong rtvec;
+    target_ulong rscratch;
+    target_ulong repc;
+    target_ulong rcode_irange;
+    target_ulong rcode_drange;
+    target_ulong trcm;
+    target_ulong trcs;
+    target_ulong rintercept;
+    target_ulong rcsrint[NUM_RCSRINT];
+
+    target_ulong rcode_ram_base;
 
     /* Virtual CSRs */
     /*
@@ -452,6 +469,7 @@ struct RISCVCPUConfig {
 
     /* Vendor-specific custom extensions */
     bool ext_XVentanaCondOps;
+    bool ext_XRivosRcode;
 
     uint8_t pmu_num;
     char *priv_spec;
@@ -468,6 +486,7 @@ struct RISCVCPUConfig {
     bool tee;
     uint64_t resetvec;
     uint64_t pa_mask;
+    uint64_t rcode_ram_mask;
 
     bool short_isa_string;
 };
@@ -535,6 +554,8 @@ void riscv_cpu_set_geilen(CPURISCVState *env, target_ulong geilen);
 bool riscv_cpu_vector_enabled(CPURISCVState *env);
 bool riscv_cpu_tee_enabled(CPURISCVState *env);
 void riscv_cpu_set_tee_enabled(CPURISCVState *env, bool enable);
+bool riscv_cpu_rcode_enabled(CPURISCVState *env);
+void riscv_cpu_set_rcode_enabled(CPURISCVState *env, bool enable);
 bool riscv_cpu_virt_enabled(CPURISCVState *env);
 void riscv_cpu_set_virt_enabled(CPURISCVState *env, bool enable);
 bool riscv_cpu_two_stage_lookup(int mmu_idx);
@@ -606,6 +627,8 @@ FIELD(TB_FLAGS, XL, 20, 2)
 FIELD(TB_FLAGS, PM_MASK_ENABLED, 22, 1)
 FIELD(TB_FLAGS, PM_BASE_ENABLED, 23, 1)
 FIELD(TB_FLAGS, VTA, 24, 1)
+/* Is the CPU in R-code? */
+FIELD(TB_FLAGS, IN_RCODE, 25, 1)
 
 #ifdef TARGET_RISCV32
 #define riscv_cpu_mxl(env)  ((void)(env), MXL_RV32)

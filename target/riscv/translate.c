@@ -80,6 +80,7 @@ typedef struct DisasContext {
     bool hlsx;
     /* vector extension */
     bool vill;
+    bool rcode;
     /*
      * Encode LMUL to lmul as follows:
      *     LMUL    vlmul    lmul
@@ -130,6 +131,7 @@ static bool always_true_p(DisasContext *ctx  __attribute__((__unused__)))
     }
 
 MATERIALISE_EXT_PREDICATE(XVentanaCondOps);
+MATERIALISE_EXT_PREDICATE(XRivosRcode);
 
 #ifdef TARGET_RISCV32
 #define get_xl(ctx)    MXL_RV32
@@ -1022,6 +1024,10 @@ static uint32_t opcode_at(DisasContextBase *dcbase, target_ulong pc)
 /* Include decoders for factored-out extensions */
 #include "decode-XVentanaCondOps.c.inc"
 
+/* Rivos Rcode instructions; include the decoder with arg typedefs first */
+#include "decode-XRivosRcode.c.inc"
+#include "insn_trans/trans_xrivosrcode.c.inc"
+
 static void decode_opc(CPURISCVState *env, DisasContext *ctx, uint16_t opcode)
 {
     /*
@@ -1034,6 +1040,7 @@ static void decode_opc(CPURISCVState *env, DisasContext *ctx, uint16_t opcode)
     } decoders[] = {
         { always_true_p,  decode_insn32 },
         { has_XVentanaCondOps_p,  decode_XVentanaCodeOps },
+        { has_XRivosRcode_p,  decode_XRivosRcode },
     };
 
     /* Check for compressed insn */
@@ -1104,6 +1111,7 @@ static void riscv_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     ctx->xl = FIELD_EX32(tb_flags, TB_FLAGS, XL);
     ctx->cs = cs;
     ctx->ntemp = 0;
+    ctx->rcode = FIELD_EX32(tb_flags, TB_FLAGS, IN_RCODE);
     memset(ctx->temp, 0, sizeof(ctx->temp));
     ctx->nftemp = 0;
     memset(ctx->ftemp, 0, sizeof(ctx->ftemp));

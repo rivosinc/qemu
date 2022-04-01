@@ -125,6 +125,22 @@ target_ulong helper_csrrw_i128(CPURISCVState *env, int csr,
 
 #ifndef CONFIG_USER_ONLY
 
+static target_ulong check_rcode_privilege_intercept(CPURISCVState *env,
+                                                    target_ulong retpc)
+{
+    env->repc = retpc;          /* repc is allowed to be unconditional */
+    if (!riscv_cpu_rcode_enabled(env)) {
+        if ((env->priv == PRV_U) && get_field(env->rintercept, RINTERCEPT_IU)) {
+            retpc = env->rtvec | RCODE_IU_VEC;
+            riscv_cpu_set_rcode_enabled(env, true);
+        } else if ((env->priv = PRV_S) && get_field(env->rintercept, RINTERCEPT_IS)) {
+            retpc = env->rtvec | RCODE_IS_VEC;
+            riscv_cpu_set_rcode_enabled(env, true);
+        }
+    }
+    return retpc;
+}
+
 target_ulong helper_sret(CPURISCVState *env)
 {
     uint64_t mstatus;
@@ -183,6 +199,10 @@ target_ulong helper_sret(CPURISCVState *env)
 
     riscv_cpu_set_mode(env, prev_priv);
 
+    if (env->rintercept) {
+        retpc = check_rcode_privilege_intercept(env, retpc);
+    }
+
     return retpc;
 }
 
@@ -220,6 +240,10 @@ target_ulong helper_mret(CPURISCVState *env)
         }
 
         riscv_cpu_set_virt_enabled(env, prev_virt);
+    }
+
+    if (env->rintercept) {
+        retpc = check_rcode_privilege_intercept(env, retpc);
     }
 
     return retpc;
@@ -299,6 +323,22 @@ target_ulong helper_hyp_hlvx_wu(CPURISCVState *env, target_ulong address)
     int mmu_idx = cpu_mmu_index(env, true) | TB_FLAGS_PRIV_HYP_ACCESS_MASK;
 
     return cpu_ldl_mmuidx_ra(env, address, mmu_idx, GETPC());
+}
+
+target_ulong helper_rret(CPURISCVState *env)
+{
+    if (!riscv_cpu_rcode_enabled(env)) {
+        riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
+    }
+
+    target_ulong retpc = env->repc;
+    if (!riscv_has_ext(env, RVC) && (retpc & 0x3)) {
+        riscv_raise_exception(env, RISCV_EXCP_INST_ADDR_MIS, GETPC());
+    }
+
+    riscv_cpu_set_rcode_enabled(env, false);
+
+    return retpc;
 }
 
 #endif /* !CONFIG_USER_ONLY */

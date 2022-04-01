@@ -451,6 +451,24 @@
  * TEE registers
  */
 #define CSR_MTTP            0xbc7
+#define CSR_MPTEPPN         0xbd2
+
+/*
+ * R-code registers
+ */
+#define CSR_RSCRATCH        0xbc0
+#define CSR_REPC            0xbc1
+#define CSR_RTRCM           0xbc2
+#define CSR_RTRCS           0xbc3
+#define CSR_RMODE           0xbc4
+#define CSR_RTVEC           0xbc5
+#define CSR_RINTERCEPT      0xbc6
+#define CSR_RCSRINT0        0xbc8
+#define CSR_RCSRINT1        0xbc9
+#define CSR_RCSRINT2        0xbca
+#define CSR_RCSRINT3        0xbcb
+#define CSR_RCODE_IRANGE    0xbcc
+#define CSR_RCODE_DRANGE    0xbcd
 
 /* mstatus CSR bits */
 #define MSTATUS_UIE         0x00000001
@@ -561,6 +579,27 @@ typedef enum {
 
 #define MTT_L1_TYPE_NC_4K       0
 #define MTT_L1_TYPE_C_4K        1
+
+/* R-code Register Fields */
+#define RMODE_PRIV          (3 << 0)
+#define RMODE_V             (1 << 2)
+#define RMODE_TEEMODE       (1 << 3)
+#define RMODE_INRCODE       (1 << 4)
+
+#define RINTERCEPT_IU       0x01
+#define RINTERCEPT_IS       0x02
+
+#define NUM_RCSRINT         4
+#define RCODE_IU_VEC        256
+#define RCODE_IS_VEC        260
+#define RTVEC_ALIGNMENT     (~0x1FFULL)
+
+#define RCODE_VEC_ASYNC     0x20
+
+#define RCODE_IRANGE_BASE   0xFFFFFFFFFFFFC000
+
+#define RCODE_DRANGE_VALID  0x0000000000000001
+#define RCODE_DRANGE_BASE   0xFFFFFFFFFFFFE000
 
 /* RV32 satp CSR field masks */
 #define SATP32_MODE         0x80000000
