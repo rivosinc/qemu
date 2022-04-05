@@ -99,7 +99,7 @@ enum {
 
 #define MAX_RISCV_PMPS (16)
 
-typedef struct CPURISCVState CPURISCVState;
+typedef struct CPUArchState CPURISCVState;
 
 #if !defined(CONFIG_USER_ONLY)
 #include "pmp.h"
@@ -114,7 +114,7 @@ FIELD(VTYPE, VMA, 7, 1)
 FIELD(VTYPE, VEDIV, 8, 2)
 FIELD(VTYPE, RESERVED, 10, sizeof(target_ulong) * 8 - 11)
 
-struct CPURISCVState {
+struct CPUArchState {
     target_ulong gpr[32];
     target_ulong gprh[32]; /* 64 top bits of the 128-bit registers */
     uint64_t fpr[32]; /* assume both F and D extensions */
@@ -321,8 +321,7 @@ struct CPURISCVState {
     uint64_t kvm_timer_frequency;
 };
 
-OBJECT_DECLARE_TYPE(RISCVCPU, RISCVCPUClass,
-                    RISCV_CPU)
+OBJECT_DECLARE_CPU_TYPE(RISCVCPU, RISCVCPUClass, RISCV_CPU)
 
 /**
  * RISCVCPUClass:
@@ -396,7 +395,7 @@ typedef struct RISCVCPUConfig RISCVCPUConfig;
  *
  * A RISCV CPU.
  */
-struct RISCVCPU {
+struct ArchCPU {
     /*< private >*/
     CPUState parent_obj;
     /*< public >*/
@@ -500,8 +499,6 @@ void riscv_cpu_set_fflags(CPURISCVState *env, target_ulong);
 #define TB_FLAGS_MSTATUS_FS MSTATUS_FS
 #define TB_FLAGS_MSTATUS_VS MSTATUS_VS
 
-typedef CPURISCVState CPUArchState;
-typedef RISCVCPU ArchCPU;
 #include "exec/cpu-all.h"
 
 FIELD(TB_FLAGS, MEM_IDX, 0, 3)

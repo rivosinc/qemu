@@ -23,17 +23,6 @@
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-
-/* Needed early for CONFIG_BSD etc. */
-
-#ifdef CONFIG_SOLARIS
-#include <sys/statvfs.h>
-/* See MySQL bug #7156 (http://bugs.mysql.com/bug.php?id=7156) for
-   discussion about Solaris header problems */
-extern int madvise(char *, size_t, int);
-#endif
-
-#include <dirent.h>
 #include "qemu-common.h"
 #include "qemu/cutils.h"
 #include "qemu/sockets.h"
@@ -50,7 +39,7 @@ static const char *hw_version = QEMU_HW_VERSION;
 int socket_set_cork(int fd, int v)
 {
 #if defined(SOL_TCP) && defined(TCP_CORK)
-    return qemu_setsockopt(fd, SOL_TCP, TCP_CORK, &v, sizeof(v));
+    return setsockopt(fd, SOL_TCP, TCP_CORK, &v, sizeof(v));
 #else
     return 0;
 #endif
@@ -59,7 +48,7 @@ int socket_set_cork(int fd, int v)
 int socket_set_nodelay(int fd)
 {
     int v = 1;
-    return qemu_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
 }
 
 int qemu_madvise(void *addr, size_t len, int advice)
@@ -619,23 +608,3 @@ writev(int fd, const struct iovec *iov, int iov_cnt)
     return readv_writev(fd, iov, iov_cnt, true);
 }
 #endif
-
-struct dirent *
-qemu_dirent_dup(struct dirent *dent)
-{
-    size_t sz = 0;
-#if defined _DIRENT_HAVE_D_RECLEN
-    /* Avoid use of strlen() if platform supports d_reclen. */
-    sz = dent->d_reclen;
-#endif
-    /*
-     * Test sz for zero even if d_reclen is available
-     * because some drivers may set d_reclen to zero.
-     */
-    if (sz == 0) {
-        /* Fallback to the most portable way. */
-        sz = offsetof(struct dirent, d_name) +
-                      strlen(dent->d_name) + 1;
-    }
-    return g_memdup(dent, sz);
-}

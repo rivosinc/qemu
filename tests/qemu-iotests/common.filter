@@ -106,13 +106,13 @@ _filter_hmp()
 # replace block job offset
 _filter_block_job_offset()
 {
-    sed -e 's/, "offset": [0-9]\+,/, "offset": OFFSET,/'
+    gsed -e 's/, "offset": [0-9]\+,/, "offset": OFFSET,/'
 }
 
 # replace block job len
 _filter_block_job_len()
 {
-    sed -e 's/, "len": [0-9]\+,/, "len": LEN,/g'
+    gsed -e 's/, "len": [0-9]\+,/, "len": LEN,/g'
 }
 
 # replace actual image size (depends on the host filesystem)
@@ -301,8 +301,17 @@ _filter_nbd()
     # Filter out the TCP port number since this changes between runs.
     sed -e '/nbd\/.*\.c:/d' \
         -e 's#127\.0\.0\.1:[0-9]*#127.0.0.1:PORT#g' \
+        -e 's#localhost:[0-9]*#localhost:PORT#g' \
+        -e 's#host=127\.0\.0\.1,port=[0-9]*#host=127.0.0.1,port=PORT#g' \
+        -e 's#host=localhost,port=[0-9]*#host=localhost,port=PORT#g' \
+        -e "s#path=$SOCK_DIR#path=SOCK_DIR#g" \
         -e "s#?socket=$SOCK_DIR#?socket=SOCK_DIR#g" \
         -e 's#\(foo\|PORT/\?\|.sock\): Failed to .*$#\1#'
+}
+
+_filter_qemu_nbd_exports()
+{
+    grep '\(exports available\|export\|size\|min block\|qemu-nbd\):'
 }
 
 _filter_qmp_empty_return()
