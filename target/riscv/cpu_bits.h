@@ -447,6 +447,11 @@
 /* Crypto Extension */
 #define CSR_SEED            0x015
 
+/*
+ * TEE registers
+ */
+#define CSR_MTTP            0xbc7
+
 /* mstatus CSR bits */
 #define MSTATUS_UIE         0x00000001
 #define MSTATUS_SIE         0x00000002
@@ -534,6 +539,29 @@ typedef enum {
 /* Virtulisation Register Fields */
 #define VIRT_ONOFF          1
 
+/* TEE Register Fields */
+#define TEE_ONOFF           1
+
+#define MTTP_EN             0x0000000000000001ULL
+#define MTTP_CPMS           0x0000000000000002ULL
+#define MTTP_MTPPN          0xFFFFFFFFFF800000ULL   /* AND with cfg.pa_mask */
+
+#define MTT_L2_TYPE         0x0000000C00000000ULL
+#define MTT_L2_INFO         0x00000003FFFFFFFFULL
+
+#define MTT_L1_INDEX        0x0000000003FFF000ULL
+#define MTT_L2_INDEX        0x00003FFFFC000000ULL
+
+#define MTT_L2_2M_INDEX     0x0000000003E00000ULL
+
+#define MTT_L2_TYPE_NC_1G       0
+#define MTT_L2_TYPE_C_1G        1
+#define MTT_L2_TYPE_MTT_L1_DIR  2
+#define MTT_L2_TYPE_2M_PAGES    3
+
+#define MTT_L1_TYPE_NC_4K       0
+#define MTT_L1_TYPE_C_4K        1
+
 /* RV32 satp CSR field masks */
 #define SATP32_MODE         0x80000000
 #define SATP32_ASID         0x7fc00000
@@ -561,6 +589,7 @@ typedef enum {
 #define PTE_G               0x020 /* Global */
 #define PTE_A               0x040 /* Accessed */
 #define PTE_D               0x080 /* Dirty */
+#define PTE_NCP             0x100 /* Non-confidential */
 #define PTE_SOFT            0x300 /* Reserved for Software */
 #define PTE_PBMT            0x6000000000000000ULL /* Page-based memory types */
 #define PTE_N               0x8000000000000000ULL /* NAPOT translation */

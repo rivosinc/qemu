@@ -599,6 +599,10 @@ static void riscv_cpu_realize(DeviceState *dev, Error **errp)
         riscv_set_feature(env, RISCV_FEATURE_DEBUG);
     }
 
+    if (cpu->cfg.tee) {
+        riscv_set_feature(env, RISCV_FEATURE_TEE);
+    }
+
     set_resetvec(env, cpu->cfg.resetvec);
 
     /* Validate that MISA_MXL is set properly. */
@@ -945,6 +949,8 @@ static Property riscv_cpu_extensions[] = {
     /* ePMP 0.9.3 */
     DEFINE_PROP_BOOL("x-epmp", RISCVCPU, cfg.epmp, false),
     DEFINE_PROP_BOOL("x-aia", RISCVCPU, cfg.aia, false),
+    /* TEE support */
+    DEFINE_PROP_BOOL("x-tee", RISCVCPU, cfg.tee, false),
 
     DEFINE_PROP_END_OF_LIST(),
 };

@@ -546,6 +546,29 @@ void riscv_cpu_set_geilen(CPURISCVState *env, target_ulong geilen)
     env->geilen = geilen;
 }
 
+bool riscv_cpu_tee_enabled(CPURISCVState *env)
+{
+    if (!riscv_feature(env, RISCV_FEATURE_TEE)) {
+        return false;
+    }
+
+    return get_field(env->tee, TEE_ONOFF);
+}
+
+void riscv_cpu_set_tee_enabled(CPURISCVState *env, bool enable)
+{
+    if (!riscv_feature(env, RISCV_FEATURE_TEE)) {
+        return;
+    }
+
+    /* Flush the TLB on all TEE mode changes. */
+    if (get_field(env->tee, TEE_ONOFF) != enable) {
+        tlb_flush(env_cpu(env));
+    }
+
+    env->tee = set_field(env->tee, TEE_ONOFF, enable);
+}
+
 bool riscv_cpu_virt_enabled(CPURISCVState *env)
 {
     if (!riscv_has_ext(env, RVH)) {
@@ -676,6 +699,87 @@ void riscv_cpu_set_mode(CPURISCVState *env, target_ulong newpriv)
 }
 
 /*
+ * get_conf_from_mtt - check the MTT for a given physical address
+ *
+ * When not in TEE mode, the MTT is searched for the 'C' bit for any
+ * page accessed, to ensure no confidential data is accessed.
+ * Return 'false' in case of an error.
+ *
+ * @env: CPURISCVState
+ * @addr: The physical address
+ * @confidential: Indication of page's confidentiality
+ */
+static bool get_conf_from_mtt(CPURISCVState *env, hwaddr addr,
+                              bool *confidential)
+{
+    CPUState *cs = env_cpu(env);
+    hwaddr base = env->mttp & MTTP_MTPPN;
+    hwaddr idx = get_field(addr, MTT_L2_INDEX) << 3;
+
+    /* When the table is not enabled, all accesses are non-confidential. */
+    if (!get_field(env->mttp, MTTP_EN)) {
+        *confidential = false;
+        return true;
+    }
+
+    MemTxResult res;
+    uint64_t ent, info;
+    ent = address_space_ldq(cs->as, base + idx, MEMTXATTRS_CONFIDENTIAL,
+        &res);
+    if (res != MEMTX_OK) {
+        return false;
+    }
+
+    switch (get_field(ent, MTT_L2_TYPE)) {
+    case MTT_L2_TYPE_NC_1G:
+        *confidential = false;
+        return true;
+
+    case MTT_L2_TYPE_C_1G:
+        *confidential = true;
+        return true;
+
+    case MTT_L2_TYPE_MTT_L1_DIR: {
+        /*
+         * L1 lookup: take the L1 page PPN from info, then load the
+         * bytes containing a 2-bit field.
+         */
+        info = get_field(ent, MTT_L2_INFO);
+        base = info << TARGET_PAGE_BITS;
+        unsigned bit_in_page = get_field(addr, MTT_L1_INDEX) << 1;
+        unsigned byte_in_page = bit_in_page / 8;
+        idx = byte_in_page & ~7ULL;
+        ent = address_space_ldq(cs->as, base + idx,
+            MEMTXATTRS_CONFIDENTIAL, &res);
+        if (res != MEMTX_OK) {
+            return false;
+        }
+        info = (ent >> (bit_in_page & 0x3F)) & 3;
+        switch (info) {
+        case MTT_L1_TYPE_NC_4K:
+            *confidential = false;
+            return true;
+        case MTT_L1_TYPE_C_4K:
+            *confidential = true;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    case MTT_L2_TYPE_2M_PAGES:
+        /* Info field is a bitmap of 32x2M pages */
+        info = get_field(ent, MTT_L2_INFO);
+        idx = get_field(addr, MTT_L2_2M_INDEX);
+        *confidential = info & (1ULL  << idx);
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+/*
  * get_physical_address_pmp - check PMP permission for this physical address
  *
  * Match the PMP region and check permission for this physical address and it's
@@ -757,6 +861,7 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
     RISCVCPU *cpu = env_archcpu(env);
     int napot_bits = 0;
     target_ulong napot_mask;
+    bool tee_mode = riscv_cpu_tee_enabled(env);
 
     /*
      * Check if we should use the background registers for the two
@@ -845,9 +950,30 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
     case VM_1_10_MBARE:
         *physical = addr;
         *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
+        /*
+         * A BARE stage always sets the confidential mode equal to TEE
+         * mode, allowing two-stage prot to be ANDed together outside.
+         */
+        if (tee_mode) {
+            *prot |= PAGE_CONF;
+        }
         return TRANSLATE_SUCCESS;
     default:
       g_assert_not_reached();
+    }
+
+    /*
+     * For TEE support, we look ahead at the second stage mode to
+     * decide about "nested walk" behaviors (skip mchk and force
+     * confidential).
+     */
+    bool nested = false;
+    if (first_stage && two_stage) {
+        if (riscv_cpu_mxl(env) == MXL_RV32) {
+            nested = get_field(env->hgatp, SATP32_MODE) != VM_1_10_MBARE;
+        } else {
+            nested = get_field(env->hgatp, SATP64_MODE) != VM_1_10_MBARE;
+        }
     }
 
     CPUState *cs = env_cpu(env);
@@ -867,6 +993,11 @@ static int get_physical_address(CPURISCVState *env, hwaddr *physical,
 
     int ptshift = (levels - 1) * ptidxbits;
     int i;
+
+    if (tee_mode) {
+        /* All implicit accesses in TEE mode are confidential */
+        attrs = MEMTXATTRS_CONFIDENTIAL;
+    }
 
 #if !TCG_OVERSIZED_GUEST
 restart:
@@ -894,6 +1025,11 @@ restart:
                                                  mmu_idx, false, true,
                                                  is_debug);
 
+            /* In TEE mode, first stage table must be confidential */
+            if (tee_mode && !(vbase_prot & PAGE_CONF)) {
+                vbase_ret = TRANSLATE_FAIL;
+            }
+
             if (vbase_ret != TRANSLATE_SUCCESS) {
                 if (fault_pte_addr) {
                     *fault_pte_addr = (base + idx * ptesize) >> 2;
@@ -904,6 +1040,22 @@ restart:
             pte_addr = vbase + idx * ptesize;
         } else {
             pte_addr = base + idx * ptesize;
+        }
+
+        /*
+         * MTT is checked for the page table pages themselves only if
+         * MTTP.CPMS is set and this is the appropriate stage for doing
+         * the checks.
+         */
+        const bool mchk = !riscv_cpu_tee_enabled(env) &&
+            get_field(env->mttp, MTTP_EN) && !nested &&
+            get_field(env->mttp, MTTP_CPMS);
+        if (mchk) {
+            bool pte_page_conf;
+            if (!get_conf_from_mtt(env, pte_addr, &pte_page_conf) ||
+                    pte_page_conf) {
+                return TRANSLATE_FAIL;
+            }
         }
 
         int pmp_prot;
@@ -992,7 +1144,7 @@ restart:
                 MemoryRegion *mr;
                 hwaddr l = sizeof(target_ulong), addr1;
                 mr = address_space_translate(cs->as, pte_addr,
-                    &addr1, &l, false, MEMTXATTRS_UNSPECIFIED);
+                    &addr1, &l, false, attrs);
                 if (memory_region_is_ram(mr)) {
                     target_ulong *pte_pa =
                         qemu_map_ram_ptr(mr->ram_block, addr1);
@@ -1038,6 +1190,16 @@ restart:
             }
             if ((pte & PTE_X)) {
                 *prot |= PAGE_EXEC;
+            }
+            /*
+             * In TEE mode, the NCP bit of the leaf PTE reflects the page's
+             * confidentiality. For two stage walks, the tlb_fill routine
+             * resolves the overall confidentiality. In nested walks, the
+             * first stage has CONF forced on so the second stage will
+             * determine the overall result.
+             */
+            if (tee_mode && (!(pte & PTE_NCP) || nested)) {
+                *prot |= PAGE_CONF;
             }
             /* add write permission on stores or if the page is already dirty,
                so that we TLB miss on later writes to update the dirty bit */
@@ -1192,6 +1354,8 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     int mode = mmu_idx;
     /* default TLB page size */
     target_ulong tlb_size = TARGET_PAGE_SIZE;
+    bool tee_mode = riscv_cpu_tee_enabled(env);
+    bool confidential = false;
 
     env->guest_phys_fault_addr = 0;
 
@@ -1246,9 +1410,21 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                     TARGET_FMT_plx " prot %d\n",
                     __func__, im_address, ret, pa, prot2);
 
+            /*
+             * The prot masks from both stages need to be combined. BARE
+             * stages and the first stage of a nested walk have CONF forced
+             * on so the two stage result is always determined by ANDing
+             * the two prot values.
+             */
             prot &= prot2;
 
             if (ret == TRANSLATE_SUCCESS) {
+                /*
+                 * Regardless of translation settings, prot ends up the
+                 * applicable value for PAGE_CONF.
+                 */
+                confidential = prot & PAGE_CONF;
+
                 ret = get_physical_address_pmp(env, &prot_pmp, &tlb_size, pa,
                                                size, access_type, mode);
 
@@ -1282,6 +1458,8 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
                       __func__, address, ret, pa, prot);
 
         if (ret == TRANSLATE_SUCCESS) {
+            confidential = prot & PAGE_CONF;
+
             ret = get_physical_address_pmp(env, &prot_pmp, &tlb_size, pa,
                                            size, access_type, mode);
 
@@ -1299,8 +1477,29 @@ bool riscv_cpu_tlb_fill(CPUState *cs, vaddr address, int size,
     }
 
     if (ret == TRANSLATE_SUCCESS) {
-        tlb_set_page(cs, address & ~(tlb_size - 1), pa & ~(tlb_size - 1),
-                     prot, mmu_idx, tlb_size);
+        /* The final PA is checked in the MTT for non-TEE-mode */
+        if (get_field(env->mttp, MTTP_EN) && !tee_mode) {
+            bool mtt_conf = false;
+            if (!get_conf_from_mtt(env, pa, &mtt_conf) || mtt_conf) {
+                /* Trigger the normal exception flow */
+                ret = TRANSLATE_FAIL;
+            }
+        }
+    }
+
+    if (ret == TRANSLATE_SUCCESS) {
+        MemTxAttrs attrs =  MEMTXATTRS_UNSPECIFIED;
+        /*
+         * Setting the attribute gives us opportunity to (1) select
+         * an address space during TLB fill and (2) pass this attribute
+         * to IO devices on read/write.
+         */
+        if (confidential) {
+            attrs = MEMTXATTRS_CONFIDENTIAL;
+        }
+        tlb_set_page_with_attrs(cs, address & ~(tlb_size - 1),
+                                pa & ~(tlb_size - 1), attrs,
+                                prot, mmu_idx, tlb_size);
         return true;
     } else if (probe) {
         return false;

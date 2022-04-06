@@ -273,6 +273,15 @@ static int aia_any32(CPURISCVState *env, int csrno)
     return any32(env, csrno);
 }
 
+static int smode_tee(CPURISCVState *env, int csrno)
+{
+    if (!riscv_cpu_tee_enabled(env) || (env->priv != PRV_S)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    return any(env, csrno);
+}
+
 static RISCVException smode(CPURISCVState *env, int csrno)
 {
     if (riscv_has_ext(env, RVS)) {
@@ -596,6 +605,31 @@ static int write_vcsr(CPURISCVState *env, int csrno, target_ulong val)
     env->vxsat = (val & VCSR_VXSAT) >> VCSR_VXSAT_SHIFT;
     return RISCV_EXCP_NONE;
 }
+
+#ifndef CONFIG_USER_ONLY
+/* TEE registers */
+static RISCVException read_mttp(CPURISCVState *env, int csrno,
+                                 target_ulong *val)
+{
+    *val = env->mttp;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_mttp(CPURISCVState *env, int csrno,
+                                 target_ulong val)
+{
+    /* Reduce the MTPPN to the implemented PA size */
+    val &= (env_archcpu(env)->cfg.pa_mask & MTTP_MTPPN) | MTTP_CPMS | MTTP_EN;
+
+    /* The enable bit can't be cleared */
+    env->mttp = (env->mttp & MTTP_EN) | val;
+
+    /* Any change to the MTTP necessitates a TLB flush */
+    tlb_flush(env_cpu(env));
+
+    return RISCV_EXCP_NONE;
+}
+#endif
 
 /* User Timers and Counters */
 static target_ulong get_ticks(bool shift)
@@ -3708,6 +3742,9 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
     [CSR_SMTE]    =    { "smte",    pointer_masking, read_smte,    write_smte    },
     [CSR_SPMMASK] =    { "spmmask", pointer_masking, read_spmmask, write_spmmask },
     [CSR_SPMBASE] =    { "spmbase", pointer_masking, read_spmbase, write_spmbase },
+
+    /* TEE */
+    [CSR_MTTP] =       { "mttp",    smode_tee, read_mttp,    write_mttp },
 
     /* Performance Counters */
     [CSR_HPMCOUNTER3]    = { "hpmcounter3",    ctr,    read_hpmcounter },

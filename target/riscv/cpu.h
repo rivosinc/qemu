@@ -87,7 +87,8 @@ enum {
     RISCV_FEATURE_EPMP,
     RISCV_FEATURE_MISA,
     RISCV_FEATURE_AIA,
-    RISCV_FEATURE_DEBUG
+    RISCV_FEATURE_DEBUG,
+    RISCV_FEATURE_TEE,
 };
 
 /* Privileged specification version */
@@ -109,6 +110,11 @@ enum {
 #define MMU_USER_IDX 3
 
 #define MAX_RISCV_PMPS (16)
+
+/* Flag bit indicating if an access is being performed with C=1 */
+#define PAGE_CONF PAGE_TARGET_1
+
+#define MEMTXATTRS_CONFIDENTIAL ((MemTxAttrs) { .secure = 1 })
 
 typedef struct CPUArchState CPURISCVState;
 
@@ -254,6 +260,10 @@ struct CPUArchState {
     /* Upper 64-bits of 128-bit CSRs */
     uint64_t mscratchh;
     uint64_t sscratchh;
+
+    /* TEE support */
+    target_ulong tee;
+    uint64_t mttp;
 
     /* Virtual CSRs */
     /*
@@ -455,6 +465,7 @@ struct RISCVCPUConfig {
     bool epmp;
     bool aia;
     bool debug;
+    bool tee;
     uint64_t resetvec;
     uint64_t pa_mask;
 
@@ -522,6 +533,8 @@ bool riscv_cpu_fp_enabled(CPURISCVState *env);
 target_ulong riscv_cpu_get_geilen(CPURISCVState *env);
 void riscv_cpu_set_geilen(CPURISCVState *env, target_ulong geilen);
 bool riscv_cpu_vector_enabled(CPURISCVState *env);
+bool riscv_cpu_tee_enabled(CPURISCVState *env);
+void riscv_cpu_set_tee_enabled(CPURISCVState *env, bool enable);
 bool riscv_cpu_virt_enabled(CPURISCVState *env);
 void riscv_cpu_set_virt_enabled(CPURISCVState *env, bool enable);
 bool riscv_cpu_two_stage_lookup(int mmu_idx);
