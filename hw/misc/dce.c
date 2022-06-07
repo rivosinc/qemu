@@ -53,16 +53,31 @@ static bool interrupt_on_completion(struct DCEDescriptor *descriptor)
 
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    for (int offset = 0; offset < descriptor->operand1; offset++)
+    int offset;
+    uint64_t completion = 0;
+    int err = 0;
+    int status = STATUS_PASS;
+    printf("Memcpy %lu bytes from 0x%lx -> 0x%lx\n",
+            descriptor->operand1, descriptor->source, descriptor->dest);
+    for (offset = 0; offset < descriptor->operand1; offset++)
     {
         uint8_t temp;
-        pci_dma_read (&state->dev, descriptor->source + offset, &temp, 1);
-        pci_dma_write(&state->dev, descriptor->dest   + offset, &temp, 1);
+        err |= pci_dma_read (&state->dev, descriptor->source + offset, &temp, 1);
+        err |= pci_dma_write(&state->dev, descriptor->dest   + offset, &temp, 1);
+        if (err) {
+            status = STATUS_FAIL;
+            break;
+        }
     }
+    completion = FIELD_DP64(completion, DCE_COMPLETION, VALID, 1);
+    completion = FIELD_DP64(completion, DCE_COMPLETION, STATUS, status);
+    completion = FIELD_DP64(completion, DCE_COMPLETION, DATA, offset);
+    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
 static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 {
+    printf("Inside %s\n", __func__);
     for (int offset = 0; offset < descriptor->operand1; offset++)
     {
         uint8_t temp;
@@ -73,6 +88,7 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 
 static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 {
+    printf("Inside %s\n", __func__);
     bool generate_bitmask = descriptor->operand0 & 1;
     hwaddr source1 = descriptor->source;
     hwaddr source2 = descriptor->operand1;
@@ -106,9 +122,10 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 {
+    printf("Inside %s\n", __func__);
     struct DCEDescriptor descriptor;
-    descriptor.opcode = 1;
-    pci_dma_read(&state->dev, descriptor_address, &descriptor, 64);
+    MemTxResult ret = pci_dma_read(&state->dev, descriptor_address, &descriptor, 64);
+    if (ret) printf("ERROR: %x\n", ret);
 
     switch (descriptor.opcode) {
         case DCE_OPCODE_MEMCPY: dce_memcpy(state, &descriptor); break;
@@ -185,7 +202,7 @@ static uint64_t read_descriptor_ring_ctrl_base(DCEState *state, int offset, unsi
 static void write_descriptor_ring_ctrl_base(DCEState *state, int offset, uint64_t val, unsigned size)
 {
     state->descriptor_ring_ctrl_base = deposit64(state->descriptor_ring_ctrl_base, offset * 8, size * 8, val);
-    state->descriptor_ring_ctrl_base &= ~0xFFF;
+    // state->descriptor_ring_ctrl_base &= ~0xFFF;
 }
 
 static uint64_t read_descriptor_ring_ctrl_limit(DCEState *state, int offset, unsigned size)
@@ -196,7 +213,7 @@ static uint64_t read_descriptor_ring_ctrl_limit(DCEState *state, int offset, uns
 static void write_descriptor_ring_ctrl_limit(DCEState *state, int offset, uint64_t val, unsigned size)
 {
     state->descriptor_ring_ctrl_limit = deposit64(state->descriptor_ring_ctrl_limit, offset * 8, size * 8, val);
-    state->descriptor_ring_ctrl_limit &= ~0xFFF;
+    // state->descriptor_ring_ctrl_limit &= ~0xFFF;
 }
 
 static uint64_t read_descriptor_ring_ctrl_head(DCEState *state, int offset, unsigned size)

@@ -10,6 +10,12 @@ REG32(DCE_STATUS, 8)
     FIELD(DCE_STATUS, ENABLE, 0, 1)
     FIELD(DCE_STATUS, RESET,  1, 2)
 
+REG64(DCE_COMPLETION, 0)
+    FIELD(DCE_COMPLETION, DATA, 0, 56)
+    FIELD(DCE_COMPLETION, SPEC, 56, 4)
+    FIELD(DCE_COMPLETION, STATUS, 60, 3)
+    FIELD(DCE_COMPLETION, VALID, 63, 1)
+
 REG32(DCE_DESCRIPTOR_RING_CTRL_BASE,  16)
 REG32(DCE_DESCRIPTOR_RING_CTRL_LIMIT, 24)
 REG32(DCE_DESCRIPTOR_RING_CTRL_HEAD,  32)
@@ -20,6 +26,11 @@ REG32(DCE_INTERRUPT_CONFIG_TIMEOUT,               56)
 REG32(DCE_INTERRUPT_CONFIG_ERROR_CONDITION,       64)
 REG32(DCE_INTERRUPT_STATUS,                       72)
 REG32(DCE_INTERRUPT_MASK,                         80)
+
+enum {
+    STATUS_PASS,
+    STATUS_FAIL
+};
 
 typedef enum DCEInterruptSource {
     DCE_INTERRUPT_DESCRIPTOR_COMPLETION = 0,
@@ -74,8 +85,8 @@ typedef struct DCEDescriptor {
 #define DCE_OPCODE_DECRYPT_DECOMPRESS 10
 #define DCE_OPCODE_COMPRESS_ENCRYPT   11
 
-typedef struct DCEDescriptorRing {
-    DCEDescriptor descriptors[9];
-} QEMU_PACKED DCEDescriptorRing;
+// typedef struct DCEDescriptorRing {
+//     DCEDescriptor descriptors[9];
+// } QEMU_PACKED DCEDescriptorRing;
 
 #endif // DCE_H
