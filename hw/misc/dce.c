@@ -51,6 +51,15 @@ static bool interrupt_on_completion(struct DCEDescriptor *descriptor)
     return descriptor->ctrl & 1;
 }
 
+static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data) {
+    uint64_t completion = 0;
+    completion = FIELD_DP64(completion, DCE_COMPLETION, DATA, data);
+    completion = FIELD_DP64(completion, DCE_COMPLETION, SPEC, spec);
+    completion = FIELD_DP64(completion, DCE_COMPLETION, STATUS, status);
+    completion = FIELD_DP64(completion, DCE_COMPLETION, VALID, 1);
+    return completion;
+}
+
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
     int offset;
@@ -69,9 +78,7 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
             break;
         }
     }
-    completion = FIELD_DP64(completion, DCE_COMPLETION, VALID, 1);
-    completion = FIELD_DP64(completion, DCE_COMPLETION, STATUS, status);
-    completion = FIELD_DP64(completion, DCE_COMPLETION, DATA, offset);
+    completion = populate_completion(status, 0, offset);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
@@ -88,44 +95,51 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 
 static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    printf("Inside %s\n", __func__);
-    bool generate_bitmask = descriptor->operand0 & 1;
+    // TODO: implement the bitmask version after the spec is settled
+    // bool generate_bitmask = descriptor->operand0 & 1;
+    bool generate_bitmask = false;
+    uint64_t completion = 0;
     hwaddr source1 = descriptor->source;
-    hwaddr source2 = descriptor->operand1;
+    hwaddr source2 = descriptor->operand2;
 
-    bool   difference_found = 0;
-    size_t difference_index = 0;
+    bool     diff_found = false;
+    uint32_t first_diff_index = 0;
+
 
     for (int offset = 0; offset < descriptor->operand1; offset++)
     {
         uint8_t byte1, byte2;
         pci_dma_read(&state->dev, source1 + offset, &byte1, 1);
         pci_dma_read(&state->dev, source2 + offset, &byte2, 1);
+        // printf("Compareing '%c' and '%c'\n", (char)byte1, (char)byte2);
+        uint8_t result = byte1 ^ byte2;
 
-        uint8_t result = ~(byte1 ^ byte2);
-
-        if (!difference_found && result == 0xFF) {
-            difference_found = true;
-            difference_index = offset;
+        if (result != 0) {
+            diff_found = true;
+            if (!generate_bitmask) {
+                first_diff_index = offset;
+                break;
+            }
         }
-
-        if (generate_bitmask) {
-            pci_dma_write(&state->dev, descriptor->dest + offset, &result, 1);
-        }
+        // if (generate_bitmask) {
+        //     pci_dma_write(&state->dev, descriptor->dest + offset, &result, 1);
+        // }
     }
 
     if (!generate_bitmask) {
-        uint64_t result = difference_index | (((uint64_t) difference_found) << 63);
+        uint64_t result = diff_found ? 1 : 0;
+        completion = populate_completion(STATUS_PASS, 0, (1 << first_diff_index));
+        pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
         pci_dma_write(&state->dev, descriptor->dest, &result, 8);
     }
 }
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 {
-    printf("Inside %s\n", __func__);
     struct DCEDescriptor descriptor;
     MemTxResult ret = pci_dma_read(&state->dev, descriptor_address, &descriptor, 64);
     if (ret) printf("ERROR: %x\n", ret);
+    printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
         case DCE_OPCODE_MEMCPY: dce_memcpy(state, &descriptor); break;
@@ -141,13 +155,15 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 static void finish_unfinished_descriptors(DCEState *state)
 {
     hwaddr current_descriptor_address = state->descriptor_ring_ctrl_head;
-
+    printf("Current head: 0x%lx, Current tail: 0x%lx\n", state->descriptor_ring_ctrl_head,
+                                                         state->descriptor_ring_ctrl_tail);
     while (current_descriptor_address != state->descriptor_ring_ctrl_tail) {
+        printf("In loop...current descriptor address: 0x%lx\n", current_descriptor_address);
         finish_descriptor(state, current_descriptor_address);
-
         current_descriptor_address += sizeof(DCEDescriptor);
         if (current_descriptor_address == state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor)) current_descriptor_address = state->descriptor_ring_ctrl_base;
     }
+    state->descriptor_ring_ctrl_head = current_descriptor_address;
 }
 
 static uint64_t read_dce_ctrl(DCEState *state, int offset, unsigned size)
