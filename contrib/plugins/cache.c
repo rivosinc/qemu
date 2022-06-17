@@ -19,7 +19,10 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 static enum qemu_plugin_mem_rw rw = QEMU_PLUGIN_MEM_RW;
 
 static gzFile stats_file = Z_NULL;
+static gzFile dump_file = Z_NULL;
+bool dump_done = false;
 static uint64_t intv_length = 200000000;
+static uint64_t dump_icount = 200000000;
 static uint64_t interval = 0;
 static uint64_t drift = 0;
 static uint64_t total_insns = 0;
@@ -65,6 +68,7 @@ enum EvictionPolicy policy;
  */
 
 typedef struct {
+    uint64_t addr;
     uint64_t tag;
     bool valid;
 } CacheBlock;
@@ -88,6 +92,9 @@ typedef struct {
     uint64_t misses;
     uint64_t iaccesses;         /* Just for the L2 instance */
     uint64_t imisses;           /* Just for the L2 instance */
+    uint64_t mmisses;           /*Just for L3 cache, L2 misses that miss in L3*/
+    uint64_t vmisses;           /*Just for L3 cache, L2 victims that miss in L3*/
+    uint64_t evictions;
 } Cache;
 
 typedef struct {
@@ -97,6 +104,7 @@ typedef struct {
     uint64_t l1_dmisses;
     uint64_t l1_imisses;
     uint64_t l2_misses;
+    uint64_t l3_misses;
 } InsnData;
 
 void (*update_hit)(Cache *cache, int set, int blk);
@@ -109,11 +117,14 @@ static int cores;
 static Cache **l1_dcaches, **l1_icaches;
 
 static bool use_l2;
+static bool use_l3;
 static Cache **l2_ucaches;
+static Cache **l3_ucaches;
 
 static GMutex *l1_dcache_locks;
 static GMutex *l1_icache_locks;
 static GMutex *l2_ucache_locks;
+static GMutex *l3_ucache_locks;
 
 static uint64_t l1_dmem_accesses;
 static uint64_t l1_imem_accesses;
@@ -124,6 +135,12 @@ static uint64_t l2_imem_accesses;
 static uint64_t l2_dmem_accesses;
 static uint64_t l2_imisses;
 static uint64_t l2_dmisses;
+static uint64_t l3_imem_accesses;
+static uint64_t l3_dmem_accesses;
+static uint64_t l3_imisses;
+static uint64_t l3_dmisses;
+//static uint64_t l3_accesses;
+//static uint64_t l3_misses;
 
 static int pow_of_two(int num)
 {
@@ -280,6 +297,9 @@ static Cache *cache_init(int blksize, int assoc, int cachesize)
     cache->misses = 0;
     cache->iaccesses = 0;
     cache->imisses = 0;
+    cache->mmisses = 0;
+    cache->vmisses = 0;
+    cache->evictions = 0;
 
     for (i = 0; i < cache->num_sets; i++) {
         cache->sets[i].blocks = g_new0(CacheBlock, assoc);
@@ -399,6 +419,85 @@ static bool access_cache(Cache *cache, uint64_t addr)
     return false;
 }
 
+static bool access_cache_return_victim(Cache *cache, uint64_t addr, uint64_t* victim_tag)
+{
+    int hit_blk, replaced_blk;
+    uint64_t tag, set;
+    (*victim_tag) = -1;
+
+    tag = extract_tag(cache, addr);
+    set = extract_set(cache, addr);
+
+    hit_blk = in_cache(cache, addr);
+    if (hit_blk != -1) {
+        if (update_hit) {
+            update_hit(cache, set, hit_blk);
+        }
+        return true;
+    }
+
+    replaced_blk = get_invalid_block(cache, set);
+
+    if (replaced_blk == -1) {
+        replaced_blk = get_replaced_block(cache, set);
+	//(*victim_tag) = cache->sets[set].blocks[replaced_blk].tag;
+	(*victim_tag) = cache->sets[set].blocks[replaced_blk].addr;
+	//Increment eviction counts here
+	cache->evictions++;
+	//fprintf(stdout,"L2 victim tag: %lx \n",*victim_tag);
+
+    }
+    if (update_miss) {
+        update_miss(cache, set, replaced_blk);
+    }
+
+    cache->sets[set].blocks[replaced_blk].tag = tag;
+    cache->sets[set].blocks[replaced_blk].addr = addr;
+    cache->sets[set].blocks[replaced_blk].valid = true;
+
+    return false;
+}
+
+//The difference between this and the usual cache is we allocate only the victims
+//from level-1 into this caches but lookup all of the misses from level-1
+static bool access_victim_cache(Cache *cache, uint64_t addr, bool is_victim)
+{
+    int hit_blk, replaced_blk;
+    uint64_t tag, set;
+
+    tag = extract_tag(cache, addr);
+    set = extract_set(cache, addr);
+
+    hit_blk = in_cache(cache, addr);
+    if (hit_blk != -1) {
+        if (update_hit) {
+            update_hit(cache, set, hit_blk);
+        }
+        return true;
+    }
+    if(is_victim)
+    {
+	    
+       replaced_blk = get_invalid_block(cache, set);
+
+       if (replaced_blk == -1) {
+          replaced_blk = get_replaced_block(cache, set);
+	  //Increment eviction counts here
+	  cache->evictions++;
+
+       }
+       if (update_miss) {
+          update_miss(cache, set, replaced_blk);
+       }
+
+       cache->sets[set].blocks[replaced_blk].tag = tag;
+       cache->sets[set].blocks[replaced_blk].valid = true;
+    }
+
+    return false;
+}
+
+
 static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
                             uint64_t vaddr, void *userdata)
 {
@@ -407,6 +506,10 @@ static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
     int cache_idx;
     InsnData *insn;
     bool hit_in_l1;
+    bool hit_in_l2;
+    bool hit_in_l3;
+    uint64_t victim_tag=-1;
+
 
     hwaddr = qemu_plugin_get_hwaddr(info, vaddr);
     if (hwaddr && qemu_plugin_hwaddr_is_io(hwaddr)) {
@@ -432,13 +535,53 @@ static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
     }
 
     g_mutex_lock(&l2_ucache_locks[cache_idx]);
-    if (!access_cache(l2_ucaches[cache_idx], effective_addr)) {
+    if(use_l3)
+    {
+	hit_in_l2 = access_cache_return_victim(l2_ucaches[cache_idx], effective_addr,&victim_tag);
+
+    }
+    else
+    {
+        hit_in_l2 = access_cache(l2_ucaches[cache_idx], effective_addr);
+    }
+    if (!hit_in_l2) {
         insn = (InsnData *) userdata;
         __atomic_fetch_add(&insn->l2_misses, 1, __ATOMIC_SEQ_CST);
         l2_ucaches[cache_idx]->misses++;
     }
     l2_ucaches[cache_idx]->accesses++;
     g_mutex_unlock(&l2_ucache_locks[cache_idx]);
+   
+    if(hit_in_l2 || !use_l3) return;
+     
+    //We care about the victims from L2C which will also be 
+    //looked up and allocated in l3
+    //We do 2 lookups in the l3, the actual miss and then the 
+    //victim
+    g_mutex_lock(&l3_ucache_locks[cache_idx]);     
+    hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], effective_addr, false); 
+    if (!hit_in_l3) {
+        insn = (InsnData *) userdata;
+        __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
+        l3_ucaches[cache_idx]->misses++;
+        l3_ucaches[cache_idx]->mmisses++;
+    }
+    l3_ucaches[cache_idx]->accesses++;
+
+    if(victim_tag != -1)//If there was an L2 victim, process that after the original L2 miss
+    {
+        hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], victim_tag, true);  
+        if (!hit_in_l3) {
+           insn = (InsnData *) userdata;
+           __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
+           l3_ucaches[cache_idx]->misses++;
+           l3_ucaches[cache_idx]->vmisses++;
+        }
+        l3_ucaches[cache_idx]->accesses++;
+    }
+
+    g_mutex_unlock(&l3_ucache_locks[cache_idx]);
+
 }
 
 static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
@@ -447,6 +590,9 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
     InsnData *insn;
     int cache_idx;
     bool hit_in_l1;
+    bool hit_in_l2;
+    bool hit_in_l3;
+    uint64_t victim_tag;
 
     insn_addr = ((InsnData *) userdata)->addr;
 
@@ -467,13 +613,52 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
     }
 
     g_mutex_lock(&l2_ucache_locks[cache_idx]);
-    if (!access_cache(l2_ucaches[cache_idx], insn_addr)) {
+
+    if(use_l3)
+    {
+	hit_in_l2 = access_cache_return_victim(l2_ucaches[cache_idx], insn_addr, &victim_tag);
+
+    }
+    else
+    {
+        hit_in_l2 = access_cache(l2_ucaches[cache_idx], insn_addr);
+    }
+    if (!hit_in_l2) {
         insn = (InsnData *) userdata;
         __atomic_fetch_add(&insn->l2_misses, 1, __ATOMIC_SEQ_CST);
         l2_ucaches[cache_idx]->imisses++;
     }
     l2_ucaches[cache_idx]->iaccesses++;
     g_mutex_unlock(&l2_ucache_locks[cache_idx]);
+
+    if(hit_in_l2 || !use_l3) return;
+     
+    //We care about the victims from L2C which will also be 
+    //looked up and allocated in l3
+    //We do 2 lookups in the l3, the actual miss and then the 
+    //victim
+    g_mutex_lock(&l3_ucache_locks[cache_idx]);     
+    hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], insn_addr, false);  
+    if (!hit_in_l3) {
+        insn = (InsnData *) userdata;
+        __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
+        l3_ucaches[cache_idx]->misses++;
+    }
+    l3_ucaches[cache_idx]->iaccesses++;
+
+    if(victim_tag != -1)//If there was an L2 victim, process that after the original L2 miss
+    {
+        hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], victim_tag, true);  
+        if (!hit_in_l3) {
+           insn = (InsnData *) userdata;
+           __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
+           l3_ucaches[cache_idx]->misses++;
+        }
+        l3_ucaches[cache_idx]->accesses++;
+    }
+
+    g_mutex_unlock(&l3_ucache_locks[cache_idx]);
+
 }
 
 static void log_interval_stats(void)
@@ -497,6 +682,17 @@ static void log_interval_stats(void)
         l2_dmem_accesses += l2_ucaches[i]->accesses;
         l2_ucaches[i]->misses = l2_ucaches[i]->imisses = l2_ucaches[i]->accesses = l2_ucaches[i]->iaccesses = 0;
     }
+    if (use_l3) {
+        gzprintf(stats_file, "                \"l3-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l3_ucaches[i]->iaccesses, l3_ucaches[i]->imisses);
+        gzprintf(stats_file, "                \"l3-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l3_ucaches[i]->accesses, l3_ucaches[i]->misses);
+        l3_imisses += l3_ucaches[i]->imisses;
+        l3_dmisses += l3_ucaches[i]->misses;
+        l3_imem_accesses += l3_ucaches[i]->iaccesses;
+        l3_dmem_accesses += l3_ucaches[i]->accesses;
+        l3_ucaches[i]->misses = l3_ucaches[i]->imisses = l3_ucaches[i]->accesses = l3_ucaches[i]->iaccesses = 0;
+    }
     gzprintf(stats_file, "                \"l1-inst\" : "
              "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
              l1_icaches[i]->accesses, l1_icaches[i]->misses);
@@ -516,6 +712,23 @@ static void log_interval_stats(void)
     interval++;
 }
 
+static void dump_l3_state(Cache* cache)
+{
+     //Loop through all the L3C lines and dump tags, if not valid dump -1
+     for (int set=0; set < cache->num_sets;set++)
+     {
+	for(int j =0; j < cache->assoc;j++)
+        { 		
+           if (cache->sets[set].blocks[j].valid)
+              gzprintf(dump_file,"PRIu64\n",cache->sets[set].blocks[j].tag);
+	   else
+              gzprintf(dump_file,"PRIu64\n",-1);
+	}
+     }
+	
+}
+
+
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 {
     if (cur_insns + drift < intv_length) {
@@ -525,6 +738,12 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     drift = (cur_insns + drift) - intv_length;
 
     log_interval_stats();
+    
+    if ((total_insns >= dump_icount) && !dump_done)
+    {
+	 dump_l3_state(l3_ucaches[0]);
+         dump_done = true; 			 
+    }
 }
 
 static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
@@ -611,9 +830,12 @@ static void caches_free(Cache **caches)
 static void append_stats_line(GString *line, uint64_t l1_daccess,
                               uint64_t l1_dmisses, uint64_t l1_iaccess,
                               uint64_t l1_imisses,  uint64_t l2_access,
-                              uint64_t l2_misses)
+                              uint64_t l2_misses, uint64_t l2_daccess,
+                              uint64_t l2_dmisses,uint64_t l2_evictions,uint64_t l3_access,
+			      uint64_t l3_misses, uint64_t l3_daccess, uint64_t l3_mmisses, 
+			      uint64_t l3_vmisses, uint64_t l3_evictions)
 {
-    double l1_dmiss_rate, l1_imiss_rate, l2_miss_rate;
+    double l1_dmiss_rate, l1_imiss_rate, l2_miss_rate, l3_miss_rate;
 
     l1_dmiss_rate = ((double) l1_dmisses) / (l1_daccess) * 100.0;
     l1_imiss_rate = ((double) l1_imisses) / (l1_iaccess) * 100.0;
@@ -629,10 +851,17 @@ static void append_stats_line(GString *line, uint64_t l1_daccess,
 
     if (use_l2) {
         l2_miss_rate =  ((double) l2_misses) / (l2_access) * 100.0;
-        g_string_append_printf(line, "  %-12lu %-11lu %10.4lf%%",
+        g_string_append_printf(line, "  %-12lu %-11lu %-11lu %-11lu %-11lu %10.4lf%%",
                                l2_access,
-                               l2_misses,
+                               l2_misses,l2_daccess, l2_dmisses, l2_evictions,
                                l2_access ? l2_miss_rate : 0.0);
+    }
+    if (use_l3) {
+        l3_miss_rate =  ((double) l3_misses) / (l3_access) * 100.0;
+        g_string_append_printf(line, "  %-12lu %-11lu %-11lu %-11lu %-11lu %-11lu %10.4lf%%",
+                               l3_access,
+                               l3_misses,l3_mmisses,l3_daccess,l3_vmisses,l3_evictions,
+                               l3_access ? l3_miss_rate : 0.0);
     }
 
     g_string_append(line, "\n");
@@ -685,14 +914,21 @@ static int l2_cmp(gconstpointer a, gconstpointer b)
 static void log_stats(void)
 {
     int i;
-    Cache *icache, *dcache, *l2_cache;
+    Cache *icache, *dcache, *l2_cache, *l3_cache;
 
-    g_autoptr(GString) rep = g_string_new("core #, data accesses, data misses,"
+    g_autoptr(GString) rep = g_string_new("l1icache size, l1dcache size, l2 size, l3 size");
+    g_string_append(rep, "\n");
+    g_string_append_printf(rep,"%-11u %-11u %-11u %-11u",l1_icaches[0]->cachesize, l1_dcaches[0]->cachesize, l2_ucaches[0]->cachesize, l3_ucaches[0]->cachesize); 
+    g_string_append(rep, "\n");
+    g_string_append(rep, "core #, data accesses, data misses,"
                                           " dmiss rate, insn accesses,"
                                           " insn misses, imiss rate");
 
     if (use_l2) {
-        g_string_append(rep, ", l2 accesses, l2 misses, l2 miss rate");
+        g_string_append(rep, ", l2 Taccesses, l2 Tmisses, l2 daccesses, l2 dmisses, l2 evictions, l2 miss rate");
+    }
+    if (use_l3) {
+        g_string_append(rep, ", l3 Taccesses, l3 Tmisses, l2 daccesses, l3 dmmisses, l3 dvmisses, l3 evictions, l3 miss rate");
     }
 
     g_string_append(rep, "\n");
@@ -702,10 +938,21 @@ static void log_stats(void)
         dcache = l1_dcaches[i];
         icache = l1_icaches[i];
         l2_cache = use_l2 ? l2_ucaches[i] : NULL;
+        l3_cache = use_l3 ? l3_ucaches[i] : NULL;
         append_stats_line(rep, dcache->accesses, dcache->misses,
                 icache->accesses, icache->misses,
                 l2_cache ? (l2_cache->accesses+l2_cache->iaccesses) : 0,
-                l2_cache ? (l2_cache->misses+l2_cache->imisses) : 0);
+                l2_cache ? (l2_cache->misses+l2_cache->imisses) : 0,
+                l2_cache ? (l2_cache->accesses) : 0,
+                l2_cache ? (l2_cache->misses) : 0,
+                l2_cache ? (l2_cache->evictions) : 0,
+                l3_cache ? (l3_cache->accesses+l3_cache->iaccesses) : 0,
+                l3_cache ? (l3_cache->misses+l3_cache->imisses) : 0,
+                l3_cache ? (l3_cache->accesses) : 0,
+                l3_cache ? (l3_cache->mmisses) : 0,
+                l3_cache ? (l3_cache->vmisses) : 0,
+                l3_cache ? (l3_cache->evictions) : 0
+		);
     }
 
     if (cores > 1) {
@@ -713,7 +960,18 @@ static void log_stats(void)
         g_string_append_printf(rep, "%-8s", "sum");
         append_stats_line(rep, l1_dmem_accesses, l1_dmisses,
                 l1_imem_accesses, l1_imisses,
-                l2_cache ? (l2_imem_accesses+l2_dmem_accesses) : 0, l2_cache ? (l2_imisses+l2_dmisses) : 0);
+                l2_cache ? (l2_cache->accesses+l2_cache->iaccesses) : 0,
+                l2_cache ? (l2_cache->misses+l2_cache->imisses) : 0,
+                l2_cache ? (l2_cache->accesses) : 0,
+                l2_cache ? (l2_cache->misses) : 0,
+                l2_cache ? (l2_cache->evictions) : 0,
+                l3_cache ? (l3_cache->accesses+l3_cache->iaccesses) : 0,
+                l3_cache ? (l3_cache->misses+l3_cache->imisses) : 0,
+                l3_cache ? (l3_cache->accesses) : 0,
+                l3_cache ? (l3_cache->mmisses) : 0,
+                l3_cache ? (l3_cache->vmisses) : 0,
+                l3_cache ? (l3_cache->evictions) : 0
+		);
     }
 
     g_string_append(rep, "\n");
@@ -786,6 +1044,12 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
     } else {
         log_interval_stats();
         gzprintf(stats_file, "\n    ],\n    \"instructions\" : %" PRIu64 ",\n    \"stats\" : {\n", total_insns);
+        if (use_l3) {
+            gzprintf(stats_file, "                \"l3-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l3_imem_accesses, l3_imisses);
+            gzprintf(stats_file, "                \"l3-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l3_dmem_accesses, l3_dmisses);
+        }
         if (use_l2) {
             gzprintf(stats_file, "                \"l2-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
                      l2_imem_accesses, l2_imisses);
@@ -809,6 +1073,10 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
     if (use_l2) {
         caches_free(l2_ucaches);
         g_free(l2_ucache_locks);
+    }
+    if (use_l3) {
+        caches_free(l3_ucaches);
+        g_free(l3_ucache_locks);
     }
 
     g_hash_table_destroy(miss_ht);
@@ -854,6 +1122,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
     int l1_iassoc, l1_iblksize, l1_icachesize;
     int l1_dassoc, l1_dblksize, l1_dcachesize;
     int l2_assoc, l2_blksize, l2_cachesize;
+    int l3_assoc, l3_blksize, l3_cachesize;
 
     limit = 32;
     sys = info->system_emulation;
@@ -869,6 +1138,10 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
     l2_assoc = 16;
     l2_blksize = 64;
     l2_cachesize = l2_assoc * l2_blksize * 2048;
+
+    l3_assoc = 16;
+    l3_blksize = 64;
+    l3_cachesize = l3_assoc * l3_blksize * 16384;//Defaults to 64MB
 
     policy = LRU;
 
@@ -894,6 +1167,20 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
             limit = STRTOLL(tokens[1]);
         } else if (g_strcmp0(tokens[0], "cores") == 0) {
             cores = STRTOLL(tokens[1]);
+        } else if (g_strcmp0(tokens[0], "l3cachesize") == 0) {
+            use_l3 = true;
+            l3_cachesize = STRTOLL(tokens[1]);
+        } else if (g_strcmp0(tokens[0], "l3blksize") == 0) {
+            use_l3 = true;
+            l3_blksize = STRTOLL(tokens[1]);
+        } else if (g_strcmp0(tokens[0], "l3assoc") == 0) {
+            use_l3 = true;
+            l3_assoc = STRTOLL(tokens[1]);
+        } else if (g_strcmp0(tokens[0], "l3") == 0) {
+            if (!qemu_plugin_bool_parse(tokens[0], tokens[1], &use_l3)) {
+                fprintf(stderr, "boolean argument parsing failed: %s\n", opt);
+                return -1;
+            }
         } else if (g_strcmp0(tokens[0], "l2cachesize") == 0) {
             use_l2 = true;
             l2_cachesize = STRTOLL(tokens[1]);
@@ -926,6 +1213,14 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
             }
         } else if (g_strcmp0(tokens[0], "ilen") == 0) {
             intv_length = strtoull(tokens[1], NULL, 0);
+        } else if (g_strcmp0(tokens[0], "l3_dump_icount") == 0) {
+            dump_icount = strtoull(tokens[1], NULL, 0);
+        } else if (g_strcmp0(tokens[0], "l3_dump_file") == 0) {
+            dump_file = gzopen(tokens[1], "wb9");
+            if (dump_file == Z_NULL) {
+                return -1;
+            }
+
         } else {
             fprintf(stderr, "option parsing failed: %s\n", opt);
             return -1;
@@ -958,9 +1253,18 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         return -1;
     }
 
+    l3_ucaches = use_l3 ? caches_init(l3_blksize, l3_assoc, l3_cachesize) : NULL;
+    if (!l3_ucaches && use_l3) {
+        const char *err = cache_config_error(l3_blksize, l3_assoc, l3_cachesize);
+        fprintf(stderr, "L3 cache cannot be constructed from given parameters\n");
+        fprintf(stderr, "%s\n", err);
+        return -1;
+    }
+
     l1_dcache_locks = g_new0(GMutex, cores);
     l1_icache_locks = g_new0(GMutex, cores);
     l2_ucache_locks = use_l2 ? g_new0(GMutex, cores) : NULL;
+    l3_ucache_locks = use_l3 ? g_new0(GMutex, cores) : NULL;
 
     if (stats_file != Z_NULL) {
         if (cores > 1) {
@@ -971,6 +1275,10 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         if (use_l2) {
             gzprintf(stats_file, "        \"l2\" :          { \"assoc\": %u, \"blksize\": %u, \"size\": %u},\n",
                      l2_assoc, l2_blksize, l2_cachesize);
+        }
+        if (use_l3) {
+            gzprintf(stats_file, "        \"l3\" :          { \"assoc\": %u, \"blksize\": %u, \"size\": %u},\n",
+                     l3_assoc, l3_blksize, l3_cachesize);
         }
             gzprintf(stats_file, "        \"l1-inst\" :     { \"assoc\": %u, \"blksize\": %u, \"size\": %u},\n",
                      l1_iassoc, l1_iblksize, l1_icachesize);
