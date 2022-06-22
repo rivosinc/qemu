@@ -82,23 +82,54 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
-static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
-{
-    printf("Inside %s\n", __func__);
-    uint64_t completion = 0;
-    for (int offset = 0; offset < descriptor->operand1; offset++)
+static void memset_helper(DCEState *state, dma_addr_t dest, uint64_t pattern1,
+                          uint64_t pattern2,size_t size) {
+    for (int offset = 0; offset < size; offset++)
     {
         uint8_t * temp;
         int pattern_offset = offset % 16;
         if (pattern_offset < 8) {
-            temp = (uint8_t *)&descriptor->operand2;
+            temp = (uint8_t *)&pattern1;
         }
         else {
             pattern_offset -= 8;
-            temp = (uint8_t *)&descriptor->operand3;
+            temp = (uint8_t *)&pattern2;
         }
         temp += pattern_offset;
-        pci_dma_write(&state->dev, descriptor->dest   + offset,        temp, 1);
+        if (pci_dma_write(&state->dev, dest + offset,temp, 1)) {
+            printf("ERROR! Addr 0x%lx\n", dest + offset);
+            break;
+        }
+    }
+}
+
+static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
+{
+    printf("Inside %s, dest is 0x%lx\n", __func__, descriptor->dest);
+    uint64_t completion = 0;
+
+    int size = descriptor->operand1;
+    // TODO: ENUM
+    // TODO: supported nested
+    if (descriptor->ctrl & (1 << 2)) {
+        int bytes_finished = 0;
+        uint64_t curr_ptr, curr_size;
+        hwaddr curr_dest = descriptor->dest;
+        while(bytes_finished < size) {
+            pci_dma_read(&state->dev, curr_dest, &curr_ptr, 8);
+            pci_dma_read(&state->dev, curr_dest + 8, &curr_size, 8);
+            printf("Read buffer: 0x%lx\n", curr_ptr);
+            printf("Read size: 0x%lx\n", curr_size);
+
+            memset_helper(state, curr_ptr, descriptor->operand2,
+                          descriptor->operand3, curr_size);
+            bytes_finished += curr_size;
+            curr_dest += 16;
+        }
+    }
+    else {
+        memset_helper(state, descriptor->dest, descriptor->operand2,
+                  descriptor->operand3, size);
     }
     completion = populate_completion(STATUS_PASS, 0, 0);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
