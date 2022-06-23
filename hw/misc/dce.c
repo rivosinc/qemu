@@ -75,9 +75,8 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
           descriptor->operand1, curr_dest, curr_src);
     int err = 0;
 
-    // TODO ENUM
-    bool dest_is_list = (descriptor->ctrl & (1 << 2)) ? true : false;
-    bool src_is_list = (descriptor->ctrl & (1 << 1)) ? true : false;
+    bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
+    bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
     printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
           dest_is_list, src_is_list);
 
@@ -107,10 +106,8 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
                 curr_src_ptr = descriptor->source;
             }
             printf("Read src buffer: 0x%lx\n", curr_src_ptr);
-            printf("Read size: 0x%lx\n", curr_dest_size);
+            printf("Read size: 0x%lx\n", curr_src_size);
         }
-
-        printf("Memcpy from 0x%lx -> 0x%lx\n", curr_src_ptr, curr_dest_ptr);
 
         /* Loop until either the source or the destination is exhausted */
         while(curr_src_size > 0 && curr_dest_size > 0)
@@ -144,7 +141,7 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
     uint64_t pattern1 = descriptor->operand2;
     uint64_t pattern2 = descriptor->operand3;
     // TODO: ENUM
-    bool is_list = (descriptor->ctrl & (1 << 2)) ? true : false;
+    bool is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     int size = descriptor->operand1;
     hwaddr curr_dest = descriptor->dest;
     int bytes_finished = 0;
@@ -192,6 +189,124 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 
 static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 {
+    uint64_t completion = 0;
+    int status;
+    uint64_t size = descriptor->operand1;
+    bool generate_bitmask = descriptor->operand0 & 1;
+
+    int bytes_finished = 0;
+    uint64_t curr_dest_ptr, curr_src_ptr, curr_src2_ptr;
+    uint64_t curr_dest_size = 0, curr_src_size = 0, curr_src2_size = 0;
+    hwaddr curr_dest = descriptor->dest;
+    hwaddr curr_src = descriptor->source;
+    hwaddr curr_src2 = descriptor->operand2;
+    bool fault = false;
+    bool finish_early = false;
+
+    bool     diff_found = false;
+    uint32_t first_diff_index = 0;
+
+    printf("size is 0x%lx curr_src: 0x%lx  curr_src2: 0x%lx \n",
+          descriptor->operand1, curr_src, curr_src2);
+    int err = 0;
+
+    bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
+    bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
+    printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
+          dest_is_list, src_is_list);
+
+    while(bytes_finished < size) {
+        if (curr_dest_size == 0) {
+            /* out for dest */
+            if (dest_is_list) {
+                pci_dma_read(&state->dev, curr_dest, &curr_dest_ptr, 8);
+                pci_dma_read(&state->dev, curr_dest + 8, &curr_dest_size, 8);
+            }
+            else {
+                curr_dest_size = size;
+                curr_dest_ptr = descriptor->dest;
+            }
+            printf("Read dest buffer: 0x%lx\n", curr_dest_ptr);
+            printf("Read size: 0x%lx\n", curr_dest_size);
+        }
+
+        if (curr_src_size == 0) {
+            /* out for src */
+            if (src_is_list) {
+                pci_dma_read(&state->dev, curr_src, &curr_src_ptr, 8);
+                pci_dma_read(&state->dev, curr_src + 8, &curr_src_size, 8);
+            }
+            else {
+                curr_src_size = size;
+                curr_src_ptr = descriptor->source;
+            }
+            printf("Read src buffer: 0x%lx\n", curr_src_ptr);
+            printf("Read size: 0x%lx\n", curr_src_size);
+        }
+
+        if (curr_src2_size == 0) {
+            /* out for src2 */
+            if (src_is_list) {
+                pci_dma_read(&state->dev, curr_src2, &curr_src2_ptr, 8);
+                pci_dma_read(&state->dev, curr_src2 + 8, &curr_src2_size, 8);
+            }
+            else {
+                curr_src2_size = size;
+                curr_src2_ptr = descriptor->operand2;
+            }
+            printf("Read src2 buffer: 0x%lx\n", curr_src2_ptr);
+            printf("Read size: 0x%lx\n", curr_src2_size);
+        }
+
+        /* Loop until either the source or the destination is exhausted */
+        while(curr_src_size > 0 && curr_src2_size > 0 &&curr_dest_size > 0)
+        {
+            uint8_t byte1, byte2;
+            pci_dma_read(&state->dev, curr_src_ptr++, &byte1, 1);
+            pci_dma_read(&state->dev, curr_src2_ptr++, &byte2, 1);
+            // printf("Compareing '%c' and '%c'\n", (char)byte1, (char)byte2);
+            uint8_t result = byte1 ^ byte2;
+            if (result != 0) {
+                if (result != 0xff) {
+                    printf("Byte1: %x Byte2: %x bytes_finished: %x\n", byte1,
+                           byte2, bytes_finished);
+                }
+                first_diff_index = diff_found ? first_diff_index : bytes_finished;
+                diff_found = true;
+                if (generate_bitmask) {
+                    pci_dma_write(&state->dev, curr_dest_ptr, &result, 1);
+                } else {
+                    finish_early = true;
+                    break;
+                }
+            }
+            if (err) {
+                printf("ERROR! Addr 0x%lx\n", curr_dest_ptr);
+                break;
+            }
+            curr_dest_ptr++;
+            curr_src_size--;
+            curr_src2_size--;
+            curr_dest_size--;
+            bytes_finished++;
+        }
+        if (err || finish_early) break;
+        /* increment the pointer to the next entry if this one is exhausted */
+        if (curr_src_size == 0) curr_src += 16;
+        if (curr_src2_size == 0) curr_src2 += 16;
+        if (curr_dest_size == 0) curr_dest += 16;
+    }
+    // TODO: fix completion
+    first_diff_index = diff_found ? (1 << first_diff_index) : 0;
+    status = fault ? STATUS_FAIL : STATUS_PASS;
+    completion = populate_completion(status, 0, first_diff_index);
+    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+
+    if (!generate_bitmask) {
+        uint64_t result = diff_found ? 1 : 0;
+        pci_dma_write(&state->dev, descriptor->dest, &result, 8);
+    }
+    /*
     bool generate_bitmask = descriptor->operand0 & 1;
     uint64_t completion = 0;
     hwaddr source1 = descriptor->source;
@@ -228,12 +343,14 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
         uint64_t result = diff_found ? 1 : 0;
         pci_dma_write(&state->dev, descriptor->dest, &result, 8);
     }
+    */
 }
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 {
     struct DCEDescriptor descriptor;
-    MemTxResult ret = pci_dma_read(&state->dev, descriptor_address, &descriptor, 64);
+    MemTxResult ret = pci_dma_read(&state->dev,
+                                   descriptor_address, &descriptor, 64);
     if (ret) printf("ERROR: %x\n", ret);
     printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
@@ -251,13 +368,16 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 static void finish_unfinished_descriptors(DCEState *state)
 {
     hwaddr current_descriptor_address = state->descriptor_ring_ctrl_head;
-    printf("Current head: 0x%lx, Current tail: 0x%lx\n", state->descriptor_ring_ctrl_head,
-                                                         state->descriptor_ring_ctrl_tail);
+    printf("Current head: 0x%lx, Current tail: 0x%lx\n",
+            state->descriptor_ring_ctrl_head, state->descriptor_ring_ctrl_tail);
     while (current_descriptor_address != state->descriptor_ring_ctrl_tail) {
-        printf("In loop...current descriptor address: 0x%lx\n", current_descriptor_address);
+        printf("In loop...current descriptor address: 0x%lx\n",
+                current_descriptor_address);
         finish_descriptor(state, current_descriptor_address);
         current_descriptor_address += sizeof(DCEDescriptor);
-        if (current_descriptor_address == state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor)) current_descriptor_address = state->descriptor_ring_ctrl_base;
+        if (current_descriptor_address ==
+            state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor))
+            current_descriptor_address = state->descriptor_ring_ctrl_base;
     }
     state->descriptor_ring_ctrl_head = current_descriptor_address;
 }
