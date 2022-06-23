@@ -46,7 +46,7 @@ static bool aligned(hwaddr addr, unsigned size)
     return addr % size == 0;
 }
 
-static bool interrupt_on_completion(struct DCEDescriptor *descriptor)
+static inline bool interrupt_on_completion(struct DCEDescriptor *descriptor)
 {
     return descriptor->ctrl & 1;
 }
@@ -60,57 +60,29 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     return completion;
 }
 
-static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
-{
-    int offset;
-    uint64_t completion = 0;
+static int memcpy_helper(DCEState *state, dma_addr_t src,
+                         dma_addr_t dest, size_t size) {
+    printf("Memcpy %lu bytes from 0x%lx -> 0x%lx\n", size, src, dest);
     int err = 0;
-    int status = STATUS_PASS;
-    printf("Memcpy %lu bytes from 0x%lx -> 0x%lx\n",
-            descriptor->operand1, descriptor->source, descriptor->dest);
-    for (offset = 0; offset < descriptor->operand1; offset++)
-    {
-        uint8_t temp;
-        err |= pci_dma_read (&state->dev, descriptor->source + offset, &temp, 1);
-        err |= pci_dma_write(&state->dev, descriptor->dest   + offset, &temp, 1);
-        if (err) {
-            status = STATUS_FAIL;
-            break;
-        }
-    }
-    completion = populate_completion(status, 0, offset);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
-}
-
-static void memset_helper(DCEState *state, dma_addr_t dest, uint64_t pattern1,
-                          uint64_t pattern2,size_t size) {
     for (int offset = 0; offset < size; offset++)
     {
-        uint8_t * temp;
-        int pattern_offset = offset % 16;
-        if (pattern_offset < 8) {
-            temp = (uint8_t *)&pattern1;
-        }
-        else {
-            pattern_offset -= 8;
-            temp = (uint8_t *)&pattern2;
-        }
-        temp += pattern_offset;
-        if (pci_dma_write(&state->dev, dest + offset,temp, 1)) {
+	    uint8_t temp;
+        err |= pci_dma_read (&state->dev, src + offset, &temp, 1);
+        err |= pci_dma_write(&state->dev, dest + offset, &temp, 1);
+        if (err) {
             printf("ERROR! Addr 0x%lx\n", dest + offset);
             break;
         }
     }
+    return err;
 }
 
-static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    printf("Inside %s, dest is 0x%lx\n", __func__, descriptor->dest);
     uint64_t completion = 0;
-
-    int size = descriptor->operand1;
-    // TODO: ENUM
-    // TODO: supported nested
+    int status = STATUS_PASS;
+    uint64_t size = descriptor->operand1;
+    printf("size is 0x%lx", descriptor->operand1);
     if (descriptor->ctrl & (1 << 2)) {
         int bytes_finished = 0;
         uint64_t curr_ptr, curr_size;
@@ -121,17 +93,68 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
             printf("Read buffer: 0x%lx\n", curr_ptr);
             printf("Read size: 0x%lx\n", curr_size);
 
-            memset_helper(state, curr_ptr, descriptor->operand2,
-                          descriptor->operand3, curr_size);
+            // memset_helper(state, descriptor, curr_ptr, curr_size);
             bytes_finished += curr_size;
             curr_dest += 16;
         }
+    } else {
+        memcpy_helper(state, descriptor->source, descriptor->dest,
+                    descriptor->operand1);
     }
-    else {
-        memset_helper(state, descriptor->dest, descriptor->operand2,
-                  descriptor->operand3, size);
+    // TODO: fix completion
+    completion = populate_completion(status, 0, 0);
+    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+}
+
+static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
+{
+    printf("Inside %s, dest is 0x%lx\n", __func__, descriptor->dest);
+    uint64_t completion = 0;
+    uint64_t pattern1 = descriptor->operand2;
+    uint64_t pattern2 = descriptor->operand3;
+    // TODO: ENUM
+    bool is_list = (descriptor->ctrl & (1 << 2)) ? true : false;
+    int size = descriptor->operand1;
+    hwaddr curr_dest = descriptor->dest;
+    int bytes_finished = 0;
+    uint64_t curr_size = size;
+    uint64_t curr_ptr = curr_dest;
+    bool fault = false;
+
+    while((bytes_finished < size) || fault) {
+        if (is_list) {
+            pci_dma_read(&state->dev, curr_dest, &curr_ptr, 8);
+            pci_dma_read(&state->dev, curr_dest + 8, &curr_size, 8);
+            // TODO: supported nested
+        }
+        printf("Current dest 0x%lx, size 0x%lx\n", curr_ptr, curr_size);
+
+        for (int offset = 0; offset < curr_size; offset++)
+        {
+            uint8_t * temp;
+            int pattern_offset = offset % 16;
+            if (pattern_offset < 8) {
+                temp = (uint8_t *)&pattern1;
+            }
+            else {
+                pattern_offset -= 8;
+                temp = (uint8_t *)&pattern2;
+            }
+            temp += pattern_offset;
+            if (pci_dma_write(&state->dev, curr_ptr + offset,temp, 1)) {
+                printf("ERROR! Addr 0x%lx\n", curr_ptr + offset);
+                fault = true;
+                break;
+            }
+        }
+        /* record how many bytes have been processed */
+        bytes_finished += curr_size;
+        /* move to next entry if it is a list */
+        curr_dest += 16;
     }
-    completion = populate_completion(STATUS_PASS, 0, 0);
+
+    int status = fault ? STATUS_FAIL : STATUS_PASS;
+    completion = populate_completion(status, 0, 0);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
