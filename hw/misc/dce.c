@@ -60,48 +60,79 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     return completion;
 }
 
-static int memcpy_helper(DCEState *state, dma_addr_t src,
-                         dma_addr_t dest, size_t size) {
-    printf("Memcpy %lu bytes from 0x%lx -> 0x%lx\n", size, src, dest);
-    int err = 0;
-    for (int offset = 0; offset < size; offset++)
-    {
-	    uint8_t temp;
-        err |= pci_dma_read (&state->dev, src + offset, &temp, 1);
-        err |= pci_dma_write(&state->dev, dest + offset, &temp, 1);
-        if (err) {
-            printf("ERROR! Addr 0x%lx\n", dest + offset);
-            break;
-        }
-    }
-    return err;
-}
-
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
     uint64_t completion = 0;
-    int status = STATUS_PASS;
+    int status;
     uint64_t size = descriptor->operand1;
-    printf("size is 0x%lx", descriptor->operand1);
-    if (descriptor->ctrl & (1 << 2)) {
-        int bytes_finished = 0;
-        uint64_t curr_ptr, curr_size;
-        hwaddr curr_dest = descriptor->dest;
-        while(bytes_finished < size) {
-            pci_dma_read(&state->dev, curr_dest, &curr_ptr, 8);
-            pci_dma_read(&state->dev, curr_dest + 8, &curr_size, 8);
-            printf("Read buffer: 0x%lx\n", curr_ptr);
-            printf("Read size: 0x%lx\n", curr_size);
 
-            // memset_helper(state, descriptor, curr_ptr, curr_size);
-            bytes_finished += curr_size;
-            curr_dest += 16;
+    int bytes_finished = 0;
+    uint64_t curr_dest_ptr, curr_src_ptr;
+    uint64_t curr_dest_size = 0, curr_src_size = 0;
+    hwaddr curr_dest = descriptor->dest;
+    hwaddr curr_src = descriptor->source;
+    printf("size is 0x%lx curr_dest: 0x%lx  curr_src: 0x%lx \n",
+          descriptor->operand1, curr_dest, curr_src);
+    int err = 0;
+
+    // TODO ENUM
+    bool dest_is_list = (descriptor->ctrl & (1 << 2)) ? true : false;
+    bool src_is_list = (descriptor->ctrl & (1 << 1)) ? true : false;
+    printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
+          dest_is_list, src_is_list);
+
+    while(bytes_finished < size) {
+        if (curr_dest_size == 0) {
+            /* out for dest */
+            if (dest_is_list) {
+                pci_dma_read(&state->dev, curr_dest, &curr_dest_ptr, 8);
+                pci_dma_read(&state->dev, curr_dest + 8, &curr_dest_size, 8);
+            }
+            else {
+                curr_dest_size = size;
+                curr_dest_ptr = descriptor->dest;
+            }
+            printf("Read dest buffer: 0x%lx\n", curr_dest_ptr);
+            printf("Read size: 0x%lx\n", curr_dest_size);
         }
-    } else {
-        memcpy_helper(state, descriptor->source, descriptor->dest,
-                    descriptor->operand1);
+
+        if (curr_src_size == 0) {
+            /* out for src */
+            if (src_is_list) {
+                pci_dma_read(&state->dev, curr_src, &curr_src_ptr, 8);
+                pci_dma_read(&state->dev, curr_src + 8, &curr_src_size, 8);
+            }
+            else {
+                curr_src_size = size;
+                curr_src_ptr = descriptor->source;
+            }
+            printf("Read src buffer: 0x%lx\n", curr_src_ptr);
+            printf("Read size: 0x%lx\n", curr_dest_size);
+        }
+
+        printf("Memcpy from 0x%lx -> 0x%lx\n", curr_src_ptr, curr_dest_ptr);
+
+        /* Loop until either the source or the destination is exhausted */
+        while(curr_src_size > 0 && curr_dest_size > 0)
+        {
+            uint8_t temp;
+            err |= pci_dma_read (&state->dev, curr_src_ptr++ , &temp, 1);
+            err |= pci_dma_write(&state->dev, curr_dest_ptr++, &temp, 1);
+            if (err) {
+                printf("ERROR! Addr 0x%lx\n", curr_dest_ptr);
+                break;
+            }
+            curr_src_size--;
+            curr_dest_size--;
+            bytes_finished++;
+        }
+        if (err) break;
+        /* increment the pointer to the next entry if this one is exhausted */
+        if (curr_src_size == 0) curr_src += 16;
+        if (curr_dest_size == 0) curr_dest += 16;
     }
     // TODO: fix completion
+    status = err ? STATUS_FAIL : STATUS_PASS;
     completion = populate_completion(status, 0, 0);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
@@ -144,6 +175,7 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
             if (pci_dma_write(&state->dev, curr_ptr + offset,temp, 1)) {
                 printf("ERROR! Addr 0x%lx\n", curr_ptr + offset);
                 fault = true;
+                // TODO better error handling
                 break;
             }
         }
