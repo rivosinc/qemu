@@ -306,44 +306,6 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
         uint64_t result = diff_found ? 1 : 0;
         pci_dma_write(&state->dev, descriptor->dest, &result, 8);
     }
-    /*
-    bool generate_bitmask = descriptor->operand0 & 1;
-    uint64_t completion = 0;
-    hwaddr source1 = descriptor->source;
-    hwaddr source2 = descriptor->operand2;
-    hwaddr dest = descriptor->dest;
-
-    bool     diff_found = false;
-    uint32_t first_diff_index = 0;
-
-
-    for (int offset = 0; offset < descriptor->operand1; offset++)
-    {
-        uint8_t byte1, byte2;
-        pci_dma_read(&state->dev, source1 + offset, &byte1, 1);
-        pci_dma_read(&state->dev, source2 + offset, &byte2, 1);
-        // printf("Compareing '%c' and '%c'\n", (char)byte1, (char)byte2);
-        uint8_t result = byte1 ^ byte2;
-        if (result != 0) {
-            first_diff_index = diff_found ? first_diff_index : offset;
-            diff_found = true;
-            if (generate_bitmask) {
-                // TODO: make this more efficient
-                pci_dma_write(&state->dev, dest + offset, &result, 1);
-            } else {
-                break;
-            }
-        }
-    }
-    first_diff_index = diff_found ? (1 << first_diff_index) : 0;
-    completion = populate_completion(STATUS_PASS, 0, first_diff_index);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
-
-    if (!generate_bitmask) {
-        uint64_t result = diff_found ? 1 : 0;
-        pci_dma_write(&state->dev, descriptor->dest, &result, 8);
-    }
-    */
 }
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
