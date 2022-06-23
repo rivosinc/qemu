@@ -60,6 +60,28 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     return completion;
 }
 
+static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
+                                  uint64_t * curr_ptr, uint64_t * curr_size,
+                                  bool is_list, size_t size) {
+    if (*curr_size != 0)
+        return;
+    int err = 0;
+    if (is_list) {
+        err |= pci_dma_read(dev, *entry, curr_ptr, 8);
+        err |= pci_dma_read(dev, (*entry) + 8, curr_size, 8);
+    }
+    else {
+        *curr_ptr = *entry;
+        *curr_size = size;
+    }
+    if (err) {
+        printf("ERROR in %s!\n", __func__);
+    } else {
+        printf("Read buffer: 0x%lx\n",  *curr_ptr);
+        printf("Read size: 0x%lx\n", *curr_size);
+    }
+}
+
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
     uint64_t completion = 0;
@@ -81,33 +103,10 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
           dest_is_list, src_is_list);
 
     while(bytes_finished < size) {
-        if (curr_dest_size == 0) {
-            /* out for dest */
-            if (dest_is_list) {
-                pci_dma_read(&state->dev, curr_dest, &curr_dest_ptr, 8);
-                pci_dma_read(&state->dev, curr_dest + 8, &curr_dest_size, 8);
-            }
-            else {
-                curr_dest_size = size;
-                curr_dest_ptr = descriptor->dest;
-            }
-            printf("Read dest buffer: 0x%lx\n", curr_dest_ptr);
-            printf("Read size: 0x%lx\n", curr_dest_size);
-        }
-
-        if (curr_src_size == 0) {
-            /* out for src */
-            if (src_is_list) {
-                pci_dma_read(&state->dev, curr_src, &curr_src_ptr, 8);
-                pci_dma_read(&state->dev, curr_src + 8, &curr_src_size, 8);
-            }
-            else {
-                curr_src_size = size;
-                curr_src_ptr = descriptor->source;
-            }
-            printf("Read src buffer: 0x%lx\n", curr_src_ptr);
-            printf("Read size: 0x%lx\n", curr_src_size);
-        }
+        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
+                              &curr_dest_size, dest_is_list, size);
+        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
+                              &curr_src_size, src_is_list, size);
 
         /* Loop until either the source or the destination is exhausted */
         while(curr_src_size > 0 && curr_dest_size > 0)
@@ -145,22 +144,18 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
     int size = descriptor->operand1;
     hwaddr curr_dest = descriptor->dest;
     int bytes_finished = 0;
-    uint64_t curr_size = size;
+    uint64_t curr_size = 0;
     uint64_t curr_ptr = curr_dest;
     bool fault = false;
 
     while((bytes_finished < size) || fault) {
-        if (is_list) {
-            pci_dma_read(&state->dev, curr_dest, &curr_ptr, 8);
-            pci_dma_read(&state->dev, curr_dest + 8, &curr_size, 8);
-            // TODO: supported nested
-        }
-        printf("Current dest 0x%lx, size 0x%lx\n", curr_ptr, curr_size);
+        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_ptr,
+                              &curr_size, is_list, size);
 
-        for (int offset = 0; offset < curr_size; offset++)
+        while(curr_size > 0)
         {
             uint8_t * temp;
-            int pattern_offset = offset % 16;
+            int pattern_offset = bytes_finished % 16;
             if (pattern_offset < 8) {
                 temp = (uint8_t *)&pattern1;
             }
@@ -169,15 +164,15 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
                 temp = (uint8_t *)&pattern2;
             }
             temp += pattern_offset;
-            if (pci_dma_write(&state->dev, curr_ptr + offset,temp, 1)) {
-                printf("ERROR! Addr 0x%lx\n", curr_ptr + offset);
+            if (pci_dma_write(&state->dev, curr_ptr++, temp, 1)) {
+                printf("ERROR! Addr 0x%lx\n", curr_ptr);
                 fault = true;
                 // TODO better error handling
                 break;
             }
+            curr_size--;
+            bytes_finished++;
         }
-        /* record how many bytes have been processed */
-        bytes_finished += curr_size;
         /* move to next entry if it is a list */
         curr_dest += 16;
     }
@@ -206,7 +201,7 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     bool     diff_found = false;
     uint32_t first_diff_index = 0;
 
-    printf("size is 0x%lx curr_src: 0x%lx  curr_src2: 0x%lx \n",
+    printf("size is 0x%lx curr_src: 0x%lx  curr_src2: 0x%lx\n",
           descriptor->operand1, curr_src, curr_src2);
     int err = 0;
 
@@ -216,48 +211,12 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
           dest_is_list, src_is_list);
 
     while(bytes_finished < size) {
-        if (curr_dest_size == 0) {
-            /* out for dest */
-            if (dest_is_list) {
-                pci_dma_read(&state->dev, curr_dest, &curr_dest_ptr, 8);
-                pci_dma_read(&state->dev, curr_dest + 8, &curr_dest_size, 8);
-            }
-            else {
-                curr_dest_size = size;
-                curr_dest_ptr = descriptor->dest;
-            }
-            printf("Read dest buffer: 0x%lx\n", curr_dest_ptr);
-            printf("Read size: 0x%lx\n", curr_dest_size);
-        }
-
-        if (curr_src_size == 0) {
-            /* out for src */
-            if (src_is_list) {
-                pci_dma_read(&state->dev, curr_src, &curr_src_ptr, 8);
-                pci_dma_read(&state->dev, curr_src + 8, &curr_src_size, 8);
-            }
-            else {
-                curr_src_size = size;
-                curr_src_ptr = descriptor->source;
-            }
-            printf("Read src buffer: 0x%lx\n", curr_src_ptr);
-            printf("Read size: 0x%lx\n", curr_src_size);
-        }
-
-        if (curr_src2_size == 0) {
-            /* out for src2 */
-            if (src_is_list) {
-                pci_dma_read(&state->dev, curr_src2, &curr_src2_ptr, 8);
-                pci_dma_read(&state->dev, curr_src2 + 8, &curr_src2_size, 8);
-            }
-            else {
-                curr_src2_size = size;
-                curr_src2_ptr = descriptor->operand2;
-            }
-            printf("Read src2 buffer: 0x%lx\n", curr_src2_ptr);
-            printf("Read size: 0x%lx\n", curr_src2_size);
-        }
-
+        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
+                              &curr_dest_size, dest_is_list, size);
+        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
+                              &curr_src_size, src_is_list, size);
+        get_next_ptr_and_size(&state->dev, &curr_src2, &curr_src2_ptr,
+                              &curr_src2_size, src_is_list, size);
         /* Loop until either the source or the destination is exhausted */
         while(curr_src_size > 0 && curr_src2_size > 0 &&curr_dest_size > 0)
         {
