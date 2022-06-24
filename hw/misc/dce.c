@@ -66,9 +66,14 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     if (*curr_size != 0)
         return;
     int err = 0;
+    uint64_t next_level_entry = *entry;
     if (is_list) {
-        err |= pci_dma_read(dev, *entry, curr_ptr, 8);
-        err |= pci_dma_read(dev, (*entry) + 8, curr_size, 8);
+        do {
+            *entry = next_level_entry;
+            err |= pci_dma_read(dev, *entry, curr_ptr, 8);
+            err |= pci_dma_read(dev, (*entry) + 8, curr_size, 8);
+            next_level_entry = *curr_ptr;
+        } while((size & (1ULL << 63)) != 0);
     }
     else {
         *curr_ptr = *entry;
