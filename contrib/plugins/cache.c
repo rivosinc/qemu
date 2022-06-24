@@ -88,14 +88,17 @@ typedef struct {
     int blksize_shift;
     uint64_t set_mask;
     uint64_t tag_mask;
-    uint64_t accesses;
-    uint64_t misses;
-    uint64_t iaccesses;         /* Just for the L2 instance */
-    uint64_t imisses;           /* Just for the L2 instance */
-    uint64_t mmisses;           /*Just for L3 cache, L2 misses that miss in L3*/
-    uint64_t vmisses;           /*Just for L3 cache, L2 victims that miss in L3*/
+    uint64_t accesses;          /* All caches*/
+    uint64_t misses;            /* All caches*/
+    uint64_t iaccesses;         /* Just for the L2 instance to separate the I and D*/
+    uint64_t imisses;           /* Just for the L2 instance to separate the I and D*/
+    uint64_t mmisses;           /*Just for L3 cache, used for L2 reads that miss in L3*/
+    uint64_t maccesses;           /*Just for L3 cache, used for L2 reads that miss in L3*/
+    uint64_t vmisses;             /*Just for L3 cache, used for L2 victims that miss in L3*/
+    uint64_t vaccesses;           /*Just for L3 cache, used for L2 victims that miss in L3*/
     uint64_t evictions;
 } Cache;
+
 
 typedef struct {
     char *disas_str;
@@ -134,13 +137,16 @@ static uint64_t l1_dmisses;
 static uint64_t l2_imem_accesses;
 static uint64_t l2_dmem_accesses;
 static uint64_t l2_imisses;
+static uint64_t l2_iaccesses;
 static uint64_t l2_dmisses;
-static uint64_t l3_imem_accesses;
-static uint64_t l3_dmem_accesses;
-static uint64_t l3_imisses;
-static uint64_t l3_dmisses;
-//static uint64_t l3_accesses;
-//static uint64_t l3_misses;
+static uint64_t l2_accesses;
+static uint64_t l2_misses;
+static uint64_t l3_accesses;
+static uint64_t l3_maccesses;
+static uint64_t l3_vaccesses;
+static uint64_t l3_misses;
+static uint64_t l3_mmisses;
+static uint64_t l3_vmisses;
 
 static int pow_of_two(int num)
 {
@@ -558,6 +564,8 @@ static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
     //looked up and allocated in l3
     //We do 2 lookups in the l3, the actual miss and then the 
     //victim
+    l3_ucaches[cache_idx]->accesses++; //Incrementing access for demand access
+    l3_ucaches[cache_idx]->maccesses++; //Incrementing access for demand access
     g_mutex_lock(&l3_ucache_locks[cache_idx]);     
     hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], effective_addr, false); 
     if (!hit_in_l3) {
@@ -566,10 +574,11 @@ static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
         l3_ucaches[cache_idx]->misses++;
         l3_ucaches[cache_idx]->mmisses++;
     }
-    l3_ucaches[cache_idx]->accesses++;
 
     if(victim_tag != -1)//If there was an L2 victim, process that after the original L2 miss
     {
+        l3_ucaches[cache_idx]->accesses++;//Incrementing access again for victim access
+        l3_ucaches[cache_idx]->vaccesses++;//Incrementing access again for victim access
         hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], victim_tag, true);  
         if (!hit_in_l3) {
            insn = (InsnData *) userdata;
@@ -577,7 +586,6 @@ static void vcpu_mem_access(unsigned int vcpu_index, qemu_plugin_meminfo_t info,
            l3_ucaches[cache_idx]->misses++;
            l3_ucaches[cache_idx]->vmisses++;
         }
-        l3_ucaches[cache_idx]->accesses++;
     }
 
     g_mutex_unlock(&l3_ucache_locks[cache_idx]);
@@ -627,7 +635,9 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
         insn = (InsnData *) userdata;
         __atomic_fetch_add(&insn->l2_misses, 1, __ATOMIC_SEQ_CST);
         l2_ucaches[cache_idx]->imisses++;
+        l2_ucaches[cache_idx]->misses++;
     }
+    l2_ucaches[cache_idx]->accesses++;
     l2_ucaches[cache_idx]->iaccesses++;
     g_mutex_unlock(&l2_ucache_locks[cache_idx]);
 
@@ -637,24 +647,29 @@ static void vcpu_insn_exec(unsigned int vcpu_index, void *userdata)
     //looked up and allocated in l3
     //We do 2 lookups in the l3, the actual miss and then the 
     //victim
+    l3_ucaches[cache_idx]->accesses++;
+
     g_mutex_lock(&l3_ucache_locks[cache_idx]);     
     hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], insn_addr, false);  
     if (!hit_in_l3) {
         insn = (InsnData *) userdata;
         __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
         l3_ucaches[cache_idx]->misses++;
+        l3_ucaches[cache_idx]->mmisses++;
+	//For L3, we can probalby count i-side read misses sep but not victims
+	//But thats not necessary to counting it as misses, mmisses and vmisses
     }
-    l3_ucaches[cache_idx]->iaccesses++;
 
     if(victim_tag != -1)//If there was an L2 victim, process that after the original L2 miss
     {
+        l3_ucaches[cache_idx]->accesses++;//Incrementing access again for victim access
         hit_in_l3 = access_victim_cache(l3_ucaches[cache_idx], victim_tag, true);  
         if (!hit_in_l3) {
            insn = (InsnData *) userdata;
            __atomic_fetch_add(&insn->l3_misses, 1, __ATOMIC_SEQ_CST);
            l3_ucaches[cache_idx]->misses++;
+           l3_ucaches[cache_idx]->vmisses++;
         }
-        l3_ucaches[cache_idx]->accesses++;
     }
 
     g_mutex_unlock(&l3_ucache_locks[cache_idx]);
@@ -671,27 +686,31 @@ static void log_interval_stats(void)
              interval, cur_insns, total_insns);
     // Not bothering with multi-core summation
     const unsigned i = 0;
-    if (use_l2) {
-        gzprintf(stats_file, "                \"l2-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                 l2_ucaches[i]->iaccesses, l2_ucaches[i]->imisses);
-        gzprintf(stats_file, "                \"l2-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                 l2_ucaches[i]->accesses, l2_ucaches[i]->misses);
-        l2_imisses += l2_ucaches[i]->imisses;
-        l2_dmisses += l2_ucaches[i]->misses;
-        l2_imem_accesses += l2_ucaches[i]->iaccesses;
-        l2_dmem_accesses += l2_ucaches[i]->accesses;
-        l2_ucaches[i]->misses = l2_ucaches[i]->imisses = l2_ucaches[i]->accesses = l2_ucaches[i]->iaccesses = 0;
-    }
     if (use_l3) {
-        gzprintf(stats_file, "                \"l3-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                 l3_ucaches[i]->iaccesses, l3_ucaches[i]->imisses);
-        gzprintf(stats_file, "                \"l3-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+        gzprintf(stats_file, "                \"l3-total\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
                  l3_ucaches[i]->accesses, l3_ucaches[i]->misses);
-        l3_imisses += l3_ucaches[i]->imisses;
-        l3_dmisses += l3_ucaches[i]->misses;
-        l3_imem_accesses += l3_ucaches[i]->iaccesses;
-        l3_dmem_accesses += l3_ucaches[i]->accesses;
-        l3_ucaches[i]->misses = l3_ucaches[i]->imisses = l3_ucaches[i]->accesses = l3_ucaches[i]->iaccesses = 0;
+        gzprintf(stats_file, "                \"l3-demandaccesses\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l3_ucaches[i]->maccesses, l3_ucaches[i]->mmisses);
+        gzprintf(stats_file, "                \"l3-evictionaccesses\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l3_ucaches[i]->vaccesses, l3_ucaches[i]->vmisses);
+        l3_misses += l3_ucaches[i]->misses;
+        l3_accesses += l3_ucaches[i]->accesses;
+        l3_mmisses += l3_ucaches[i]->mmisses;
+        l3_maccesses += l3_ucaches[i]->maccesses;
+        l3_vmisses += l3_ucaches[i]->vmisses;
+        l3_vaccesses += l3_ucaches[i]->vaccesses;
+        l3_ucaches[i]->mmisses = l3_ucaches[i]->vmisses = l3_ucaches[i]->maccesses = l3_ucaches[i]->vaccesses = l3_ucaches[i]->accesses =l3_ucaches[i]->misses =0;
+    }
+    if (use_l2) {
+        gzprintf(stats_file, "                \"l2-total\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 l2_ucaches[i]->accesses, l2_ucaches[i]->misses);
+        gzprintf(stats_file, "                \"l2-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                 (l2_ucaches[i]->accesses - l2_ucaches[i]->iaccesses),(l2_ucaches[i]->misses-l2_ucaches[i]->imisses));
+        l2_imisses += l2_ucaches[i]->imisses;
+        l2_misses += l2_ucaches[i]->misses;
+        l2_iaccesses += l2_ucaches[i]->iaccesses;
+        l2_accesses += l2_ucaches[i]->accesses;
+        l2_ucaches[i]->misses = l2_ucaches[i]->imisses = l2_ucaches[i]->accesses = l2_ucaches[i]->iaccesses = 0;
     }
     gzprintf(stats_file, "                \"l1-inst\" : "
              "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
@@ -1045,20 +1064,22 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
         log_interval_stats();
         gzprintf(stats_file, "\n    ],\n    \"instructions\" : %" PRIu64 ",\n    \"stats\" : {\n", total_insns);
         if (use_l3) {
-            gzprintf(stats_file, "                \"l3-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                     l3_imem_accesses, l3_imisses);
-            gzprintf(stats_file, "                \"l3-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                     l3_dmem_accesses, l3_dmisses);
+            gzprintf(stats_file, "                \"l3-total\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l3_accesses, l3_misses);
+            gzprintf(stats_file, "                \"l3-demandaccesses\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l3_maccesses, l3_mmisses);
+            gzprintf(stats_file, "                \"l3-evictionaccesses\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l3_vaccesses, l3_vmisses);
         }
         if (use_l2) {
-            gzprintf(stats_file, "                \"l2-inst\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                     l2_imem_accesses, l2_imisses);
+            gzprintf(stats_file, "                \"l2-total\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
+                     l2_accesses, l2_misses);
             gzprintf(stats_file, "                \"l2-data\" :      { \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n",
-                     l2_dmem_accesses, l2_dmisses);
+                     (l2_accesses - l2_iaccesses), (l2_misses - l2_imisses));
         }
-        gzprintf(stats_file, "        \"l1-inst\" : "
+        gzprintf(stats_file, "                \"l1-inst\" : "
                  "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "},\n", l1_imem_accesses, l1_imisses);
-        gzprintf(stats_file, "        \"l1-data\" : "
+        gzprintf(stats_file, "                \"l1-data\" : "
                  "{ \"accesses\" : %" PRIu64 ", \"misses\" : %" PRIu64 "}\n", l1_dmem_accesses, l1_dmisses);
         gzprintf(stats_file, "    }\n}\n");
         gzclose_w(stats_file);
