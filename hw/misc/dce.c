@@ -24,6 +24,9 @@ typedef struct DCEState {
     InterruptSourceInfo interrupt_source_infos[DCE_INTERRUPT_MAX];
     uint64_t interrupt_mask;
     uint64_t interrupt_status;
+
+    /* Storage for 8 32B keys */
+	uint64_t keys[8][4];
 } DCEState;
 
 static void raise_interrupt(DCEState *state, DCEInterruptSource interrupt_source)
@@ -84,6 +87,25 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     } else {
         printf("Read buffer: 0x%lx\n",  *curr_ptr);
         printf("Read size: 0x%lx\n", *curr_size);
+    }
+}
+
+static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor) {
+    printf("In %s\n", __func__);
+    uint64_t * key = state->keys[descriptor->dest];
+    uint64_t * src = (uint64_t *)descriptor->source;
+    for (int i = 0; i < 4; i ++) {
+        pci_dma_read(&state->dev, (dma_addr_t)src, &key[i], 8);
+        printf("Loaded key: 0x%lx\n", key[i]);
+        src++;
+    }
+}
+
+static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor) {
+    printf("In %s\n", __func__);
+    uint64_t * key = state->keys[descriptor->dest];
+    for (int i = 0; i < 4; i ++) {
+        key[i] = 0;
     }
 }
 
@@ -281,9 +303,11 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
     printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
-        case DCE_OPCODE_MEMCPY: dce_memcpy(state, &descriptor); break;
-        case DCE_OPCODE_MEMSET: dce_memset(state, &descriptor); break;
-        case DCE_OPCODE_MEMCMP: dce_memcmp(state, &descriptor); break;
+        case DCE_OPCODE_MEMCPY:     dce_memcpy(state, &descriptor); break;
+        case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
+        case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
+        case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
+        case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
     }
 
     if (interrupt_on_completion(&descriptor)) {
