@@ -962,6 +962,9 @@ static Property riscv_cpu_properties[] = {
 
     DEFINE_PROP_UINT64("resetvec", RISCVCPU, cfg.resetvec, DEFAULT_RSTVEC),
 
+    DEFINE_PROP_UINT64("pa-mask", RISCVCPU, cfg.pa_mask,
+                       (1ULL << TARGET_PHYS_ADDR_SPACE_BITS) - 1),
+
     DEFINE_PROP_BOOL("short-isa-string", RISCVCPU, cfg.short_isa_string, false),
 
     DEFINE_PROP_BOOL("rvv_ta_all_1s", RISCVCPU, cfg.rvv_ta_all_1s, false),

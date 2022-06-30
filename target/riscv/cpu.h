@@ -456,6 +456,7 @@ struct RISCVCPUConfig {
     bool aia;
     bool debug;
     uint64_t resetvec;
+    uint64_t pa_mask;
 
     bool short_isa_string;
 };
