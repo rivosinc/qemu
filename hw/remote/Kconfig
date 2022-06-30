@@ -6,3 +6,6 @@ config MULTIPROCESS
 config VFIO_USER_SERVER
     bool
     depends on MULTIPROCESS
+
+config RELAY_DEVICE
+    bool

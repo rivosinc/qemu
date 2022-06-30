@@ -13,3 +13,8 @@ vfu_bar_register(int i, uint64_t addr, uint64_t size) "vfu: BAR %d: addr 0x%"PRI
 vfu_bar_rw_enter(const char *op, uint64_t addr) "vfu: %s request for BAR address 0x%"PRIx64""
 vfu_bar_rw_exit(const char *op, uint64_t addr) "vfu: Finished %s of BAR address 0x%"PRIx64""
 vfu_interrupt(int pirq) "vfu: sending interrupt to device - PIRQ %d"
+
+# relay.c
+relay_read(unsigned bus, unsigned len, uint64_t addr, uint64_t val) "relay: read bus %u; %uB @ 0x%"PRIx64" -> 0x%"PRIx64""
+relay_write(unsigned bus, unsigned len, uint64_t addr, uint64_t val) "relay: write bus %u; %uB @ 0x%"PRIx64" <- 0x%"PRIx64""
+relay_signal(unsigned signo, unsigned level) "relay: signal %u -> %u"
