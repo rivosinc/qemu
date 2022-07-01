@@ -83,6 +83,7 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
         *curr_ptr = *entry;
         *curr_size = size;
     }
+
     if (err) {
         printf("ERROR in %s!\n", __func__);
     } else {
@@ -279,19 +280,28 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size = descriptor->operand2;
-    dma_addr_t src_dma = descriptor->source;
-    dma_addr_t dest_dma = descriptor->dest;
     uint64_t completion;
-    int compress_res = 0, err = 0;
+    int compress_res = 0, err = 0, bytes_finished = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
     char * dest_local = calloc(dest_size, 1);
+    uint64_t curr_dest_ptr, curr_src_ptr;
+    uint64_t curr_dest_size = 0, curr_src_size = 0;
+    hwaddr curr_dest = descriptor->dest;
+    hwaddr curr_src = descriptor->source;
 
+    bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
+    bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
     /* copy to local buffer */
-    for (int i = 0; i < src_size; i++) {
-        err |= pci_dma_read(&state->dev, src_dma++, &src_local[i], 8);
+    while(bytes_finished < src_size) {
+        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
+                              &curr_src_size, src_is_list, src_size);
+        err |= pci_dma_read(&state->dev, curr_src_ptr++, &src_local[bytes_finished], 8);
         if (err) break;
+        bytes_finished++;
+        if (--curr_src_size == 0) curr_src += 16;
     }
+
     /* perform compression / decompression */
     switch(descriptor->opcode)
     {
@@ -309,11 +319,15 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             break;
     }
     err |= (compress_res == 0);
-
     /* copy back the results */
-    for (int i = 0; i < compress_res; i++) {
-        err |= pci_dma_write(&state->dev, dest_dma + i, &dest_local[i], 8);
-        if (err) {printf("ERROR! 0x%lx, 0x%lx\n", dest_dma, (uint64_t)dest_local);break;}
+    bytes_finished = 0;
+    while(bytes_finished < compress_res) {
+        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
+                              &curr_dest_size, dest_is_list, compress_res);
+        err |= pci_dma_write(&state->dev, curr_dest_ptr++, &dest_local[bytes_finished], 8);
+        if (err) break;
+        bytes_finished++;
+        if (--curr_dest_size == 0) curr_dest += 16;
     }
 
     // TODO: error
