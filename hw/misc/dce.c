@@ -7,6 +7,7 @@
 #include "hw/misc/dce.h"
 #include "hw/pci/msi.h"
 #include <signal.h>
+#include "lz4.h"
 
 #define reg_addr(reg) (A_ ## reg)
 
@@ -87,25 +88,6 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     } else {
         printf("Read buffer: 0x%lx\n",  *curr_ptr);
         printf("Read size: 0x%lx\n", *curr_size);
-    }
-}
-
-static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor) {
-    printf("In %s\n", __func__);
-    uint64_t * key = state->keys[descriptor->dest];
-    uint64_t * src = (uint64_t *)descriptor->source;
-    for (int i = 0; i < 4; i ++) {
-        pci_dma_read(&state->dev, (dma_addr_t)src, &key[i], 8);
-        printf("Loaded key: 0x%lx\n", key[i]);
-        src++;
-    }
-}
-
-static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor) {
-    printf("In %s\n", __func__);
-    uint64_t * key = state->keys[descriptor->dest];
-    for (int i = 0; i < 4; i ++) {
-        key[i] = 0;
     }
 }
 
@@ -294,6 +276,70 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     }
 }
 
+static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
+    uint64_t src_size = descriptor->operand1;
+    uint64_t dest_size = descriptor->operand2;
+    dma_addr_t src_dma = descriptor->source;
+    dma_addr_t dest_dma = descriptor->dest;
+    uint64_t completion;
+    int compress_res = 0, err = 0;
+    /* create local buffers used for LZ4 */
+    char * src_local = malloc(src_size);
+    char * dest_local = calloc(dest_size, 1);
+
+    /* copy to local buffer */
+    for (int i = 0; i < src_size; i++) {
+        err |= pci_dma_read(&state->dev, src_dma++, &src_local[i], 8);
+        if (err) break;
+    }
+    /* perform compression / decompression */
+    switch(descriptor->opcode)
+    {
+        case DCE_OPCODE_COMPRESS:
+            compress_res = LZ4_compress_default(src_local, dest_local,
+                                                src_size, dest_size);
+            printf("Compressed - %d bytes\n", compress_res);
+            break;
+        case DCE_OPCODE_DECOMPRESS:
+            compress_res = LZ4_decompress_safe(src_local, dest_local,
+                                                src_size, dest_size);
+            printf("Decompressed - %d bytes\n", compress_res);
+            break;
+        default:
+            break;
+    }
+    err |= (compress_res == 0);
+
+    /* copy back the results */
+    for (int i = 0; i < compress_res; i++) {
+        err |= pci_dma_write(&state->dev, dest_dma + i, &dest_local[i], 8);
+        if (err) {printf("ERROR! 0x%lx, 0x%lx\n", dest_dma, (uint64_t)dest_local);break;}
+    }
+
+    // TODO: error
+    completion = populate_completion(STATUS_PASS, 0, compress_res);
+    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+}
+
+static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor) {
+    printf("In %s\n", __func__);
+    uint64_t * key = state->keys[descriptor->dest];
+    uint64_t * src = (uint64_t *)descriptor->source;
+    for (int i = 0; i < 4; i ++) {
+        pci_dma_read(&state->dev, (dma_addr_t)src, &key[i], 8);
+        printf("Loaded key: 0x%lx\n", key[i]);
+        src++;
+    }
+}
+
+static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor) {
+    printf("In %s\n", __func__);
+    uint64_t * key = state->keys[descriptor->dest];
+    for (int i = 0; i < 4; i ++) {
+        key[i] = 0;
+    }
+}
+
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
 {
     struct DCEDescriptor descriptor;
@@ -306,6 +352,8 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_MEMCPY:     dce_memcpy(state, &descriptor); break;
         case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
         case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
+        case DCE_OPCODE_COMPRESS:
+        case DCE_OPCODE_DECOMPRESS: dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
         case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
     }
