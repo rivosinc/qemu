@@ -189,6 +189,8 @@ static void lru_update_blk(Cache *cache, int set_idx, int blk_idx)
     set->lru_gen_counter++;
 }
 
+static void invalidate_block(Cache *cache,int set_idx);
+
 static int lru_get_lru_block(Cache *cache, int set_idx)
 {
     int i, min_idx, min_priority;
@@ -473,7 +475,20 @@ static bool access_victim_cache(Cache *cache, uint64_t addr, bool is_victim)
 
     tag = extract_tag(cache, addr);
     set = extract_set(cache, addr);
+    if (!is_victim)
+    {
+       hit_blk = in_cache(cache,addr);
+       if(hit_blk!=1)
+       {
+          //mark it invalid on a hit
+          cache->sets[set].blocks[hit_blk].valid = false;
+          cache->sets[set].blocks[hit_blk].tag = 0;
+	  return true;
+       }
+       else return false;
+    }
 
+    //From here on its victim case
     hit_blk = in_cache(cache, addr);
     if (hit_blk != -1) {
         if (update_hit) {
@@ -481,12 +496,13 @@ static bool access_victim_cache(Cache *cache, uint64_t addr, bool is_victim)
         }
         return true;
     }
-    if(is_victim)
+    else
     {
 	    
        replaced_blk = get_invalid_block(cache, set);
 
-       if (replaced_blk == -1) {
+       if (replaced_blk == -1) 
+       {
           replaced_blk = get_replaced_block(cache, set);
 	  //Increment eviction counts here
 	  cache->evictions++;
