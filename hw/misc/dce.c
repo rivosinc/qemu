@@ -9,7 +9,23 @@
 #include <signal.h>
 #include "lz4.h"
 
+#include "qemu/osdep.h"
+#include "crypto/init.h"
+#include "crypto/xts.h"
+#include "crypto/aes.h"
+
 #define reg_addr(reg) (A_ ## reg)
+#define DCE_AES_KEYLEN    32
+
+typedef struct {
+    int keylen;
+    unsigned char key1[32];
+    unsigned char key2[32];
+    uint64_t seqnum;
+    unsigned long PTLEN;
+    unsigned char * PTX;
+    unsigned char * CTX;
+} QCryptoXTSTestData;
 
 typedef struct DCEState {
     PCIDevice dev;
@@ -27,7 +43,7 @@ typedef struct DCEState {
     uint64_t interrupt_status;
 
     /* Storage for 8 32B keys */
-	uint64_t keys[8][4];
+	unsigned char keys[8][32];
 } DCEState;
 
 static void raise_interrupt(DCEState *state, DCEInterruptSource interrupt_source)
@@ -64,6 +80,34 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     return completion;
 }
 
+struct TestAES {
+    AES_KEY enc;
+    AES_KEY dec;
+};
+
+/* Crypto Functions */
+static void test_xts_aes_encrypt(const void *ctx,
+                                 size_t length,
+                                 uint8_t *dst,
+                                 const uint8_t *src)
+{
+    const struct TestAES *aesctx = ctx;
+
+    AES_encrypt(src, dst, &aesctx->enc);
+}
+
+
+static void test_xts_aes_decrypt(const void *ctx,
+                                 size_t length,
+                                 uint8_t *dst,
+                                 const uint8_t *src)
+{
+    const struct TestAES *aesctx = ctx;
+
+    AES_decrypt(src, dst, &aesctx->dec);
+}
+
+/* Data processing functions */
 static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
                                   uint64_t * curr_ptr, uint64_t * curr_size,
                                   bool is_list, size_t size) {
@@ -277,14 +321,55 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     }
 }
 
+static void dce_encrypt(DCEState *state,
+                          struct DCEDescriptor *descriptor,
+                          unsigned char * src, unsigned char * dest,
+                          uint64_t size) {
+
+    /* TODO sanity check the size / alignment */
+    printf("In %s\n", __func__);
+    uint8_t Torg[16], T[16];
+    struct TestAES aesdata;
+    struct TestAES aestweak;
+    // FIXME: fixed seqnum / IV
+    uint64_t seq = 0xbaddcafe;
+    /*
+     * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
+     * | HASH KID | TWEAKIV ID | TWEAK KID | SEC KID |
+     */
+    uint8_t * key_ids = (uint8_t *)&descriptor->operand3;
+    uint8_t sec_kid = key_ids[0];
+    uint8_t tweak_kid = key_ids[1];
+
+    /* setup the encryption keys */
+    AES_set_encrypt_key(state->keys[sec_kid], DCE_AES_KEYLEN / 2 * 8,
+                        &aesdata.enc);
+    AES_set_decrypt_key(state->keys[sec_kid], DCE_AES_KEYLEN / 2 * 8,
+                        &aesdata.dec);
+    AES_set_encrypt_key(state->keys[tweak_kid], DCE_AES_KEYLEN / 2 * 8,
+                        &aestweak.enc);
+    AES_set_decrypt_key(state->keys[tweak_kid], DCE_AES_KEYLEN / 2 * 8,
+                        &aestweak.dec);
+
+    /* setting up IV */
+    memcpy(Torg, &seq, 8);
+    memset(Torg + 8, 0, 8);
+    memcpy(T, Torg, sizeof(T));
+
+    xts_encrypt(&aesdata, &aestweak,
+                test_xts_aes_encrypt,
+                test_xts_aes_decrypt,
+                T, size, dest, src);
+}
+
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
     uint64_t src_size = descriptor->operand1;
-    uint64_t dest_size = descriptor->operand2;
+    uint64_t dest_size;
     uint64_t completion;
     int compress_res = 0, err = 0, bytes_finished = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
-    char * dest_local = calloc(dest_size, 1);
+    char * dest_local;
     uint64_t curr_dest_ptr, curr_src_ptr;
     uint64_t curr_dest_size = 0, curr_src_size = 0;
     hwaddr curr_dest = descriptor->dest;
@@ -292,6 +377,18 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
+
+    if (descriptor->opcode == DCE_OPCODE_ENCRYPT ||
+        descriptor->opcode == DCE_OPCODE_DECRYPT) {
+        /* crypto, dest size == src size */
+        dest_size = src_size;
+    }
+    else {
+        /* Compression operations, dest has its own size */
+        dest_size = descriptor->operand2;
+    }
+    dest_local = calloc(dest_size, 1);
+
     /* copy to local buffer */
     while(bytes_finished < src_size) {
         get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
@@ -315,6 +412,12 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
                                                 src_size, dest_size);
             printf("Decompressed - %d bytes\n", compress_res);
             break;
+        case DCE_OPCODE_ENCRYPT:
+            /* TODO: other algorithm */
+            dce_encrypt(state, descriptor, (uint8_t *)src_local,
+                       (uint8_t *)dest_local, src_size);
+            compress_res = src_size;
+            break;
         default:
             break;
     }
@@ -329,29 +432,23 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
         bytes_finished++;
         if (--curr_dest_size == 0) curr_dest += 16;
     }
-
     // TODO: error
     completion = populate_completion(STATUS_PASS, 0, compress_res);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+
 }
 
 static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor) {
     printf("In %s\n", __func__);
-    uint64_t * key = state->keys[descriptor->dest];
+    unsigned char * key = state->keys[descriptor->dest];
     uint64_t * src = (uint64_t *)descriptor->source;
-    for (int i = 0; i < 4; i ++) {
-        pci_dma_read(&state->dev, (dma_addr_t)src, &key[i], 8);
-        printf("Loaded key: 0x%lx\n", key[i]);
-        src++;
-    }
+    pci_dma_read(&state->dev, (dma_addr_t)src, key, DCE_AES_KEYLEN);
 }
 
 static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor) {
     printf("In %s\n", __func__);
-    uint64_t * key = state->keys[descriptor->dest];
-    for (int i = 0; i < 4; i ++) {
-        key[i] = 0;
-    }
+    unsigned char * key = state->keys[descriptor->dest];
+    memset(key, 0, DCE_AES_KEYLEN);
 }
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
@@ -366,6 +463,7 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_MEMCPY:     dce_memcpy(state, &descriptor); break;
         case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
         case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
+        case DCE_OPCODE_ENCRYPT:
         case DCE_OPCODE_COMPRESS:
         case DCE_OPCODE_DECOMPRESS: dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
