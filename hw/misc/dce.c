@@ -321,10 +321,10 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     }
 }
 
-static void dce_encrypt(DCEState *state,
-                          struct DCEDescriptor *descriptor,
-                          unsigned char * src, unsigned char * dest,
-                          uint64_t size) {
+static void dce_crypto(DCEState *state,
+                       struct DCEDescriptor *descriptor,
+                       unsigned char * src, unsigned char * dest,
+                       uint64_t size, bool is_encrypt) {
 
     /* TODO sanity check the size / alignment */
     printf("In %s\n", __func__);
@@ -355,18 +355,24 @@ static void dce_encrypt(DCEState *state,
     memcpy(Torg, &seq, 8);
     memset(Torg + 8, 0, 8);
     memcpy(T, Torg, sizeof(T));
-
-    xts_encrypt(&aesdata, &aestweak,
-                test_xts_aes_encrypt,
-                test_xts_aes_decrypt,
-                T, size, dest, src);
+    if (is_encrypt) {
+        xts_encrypt(&aesdata, &aestweak,
+                    test_xts_aes_encrypt,
+                    test_xts_aes_decrypt,
+                    T, size, dest, src);
+    } else {
+        xts_decrypt(&aesdata, &aestweak,
+                    test_xts_aes_encrypt,
+                    test_xts_aes_decrypt,
+                    T, size, dest, src);
+    }
 }
 
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size;
     uint64_t completion;
-    int compress_res = 0, err = 0, bytes_finished = 0;
+    int compress_res = src_size, err = 0, bytes_finished = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
     char * dest_local;
@@ -377,6 +383,8 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
+
+    bool is_encrypt = false;
 
     if (descriptor->opcode == DCE_OPCODE_ENCRYPT ||
         descriptor->opcode == DCE_OPCODE_DECRYPT) {
@@ -393,7 +401,8 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     while(bytes_finished < src_size) {
         get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
                               &curr_src_size, src_is_list, src_size);
-        err |= pci_dma_read(&state->dev, curr_src_ptr++, &src_local[bytes_finished], 8);
+        err |= pci_dma_read(&state->dev, curr_src_ptr++,
+                            &src_local[bytes_finished], 8);
         if (err) break;
         bytes_finished++;
         if (--curr_src_size == 0) curr_src += 16;
@@ -413,10 +422,16 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             printf("Decompressed - %d bytes\n", compress_res);
             break;
         case DCE_OPCODE_ENCRYPT:
+            is_encrypt = true;
             /* TODO: other algorithm */
-            dce_encrypt(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)dest_local, src_size);
-            compress_res = src_size;
+            dce_crypto(state, descriptor, (uint8_t *)src_local,
+                       (uint8_t *)dest_local, src_size, is_encrypt);
+            break;
+        case DCE_OPCODE_DECRYPT:
+            is_encrypt = false;
+            /* TODO: other algorithm */
+            dce_crypto(state, descriptor, (uint8_t *)src_local,
+                       (uint8_t *)dest_local, src_size, is_encrypt);
             break;
         default:
             break;
@@ -464,6 +479,7 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
         case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
         case DCE_OPCODE_ENCRYPT:
+        case DCE_OPCODE_DECRYPT:
         case DCE_OPCODE_COMPRESS:
         case DCE_OPCODE_DECOMPRESS: dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
