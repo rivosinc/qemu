@@ -376,6 +376,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
     char * dest_local;
+    char * intermediate;
     uint64_t curr_dest_ptr, curr_src_ptr;
     uint64_t curr_dest_size = 0, curr_src_size = 0;
     hwaddr curr_dest = descriptor->dest;
@@ -383,8 +384,6 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
-
-    bool is_encrypt = false;
 
     if (descriptor->opcode == DCE_OPCODE_ENCRYPT ||
         descriptor->opcode == DCE_OPCODE_DECRYPT) {
@@ -422,16 +421,32 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             printf("Decompressed - %d bytes\n", compress_res);
             break;
         case DCE_OPCODE_ENCRYPT:
-            is_encrypt = true;
             /* TODO: other algorithm */
             dce_crypto(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)dest_local, src_size, is_encrypt);
+                       (uint8_t *)dest_local, src_size, true);
             break;
         case DCE_OPCODE_DECRYPT:
-            is_encrypt = false;
             /* TODO: other algorithm */
             dce_crypto(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)dest_local, src_size, is_encrypt);
+                       (uint8_t *)dest_local, src_size, false);
+            break;
+        case DCE_OPCODE_COMPRESS_ENCRYPT:
+            intermediate = calloc(dest_size, 1);
+            compress_res = LZ4_compress_default(src_local, intermediate,
+                                                src_size, dest_size);
+            printf("Compressed - %d bytes\n", compress_res);
+            dce_crypto(state, descriptor, (uint8_t *)intermediate,
+                       (uint8_t *)dest_local, compress_res, true);
+            free(intermediate);
+            break;
+        case DCE_OPCODE_DECRYPT_DECOMPRESS:
+            intermediate = calloc(src_size, 1);
+            dce_crypto(state, descriptor, (uint8_t *)src_local,
+                       (uint8_t *)intermediate, src_size, false);
+            compress_res = LZ4_decompress_safe(intermediate, dest_local,
+                                                src_size, dest_size);
+            printf("Decompressed - %d bytes\n", compress_res);
+            free(intermediate);
             break;
         default:
             break;
@@ -447,6 +462,8 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
         bytes_finished++;
         if (--curr_dest_size == 0) curr_dest += 16;
     }
+    free(src_local);
+    free(dest_local);
     // TODO: error
     completion = populate_completion(STATUS_PASS, 0, compress_res);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
@@ -480,6 +497,8 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
         case DCE_OPCODE_ENCRYPT:
         case DCE_OPCODE_DECRYPT:
+        case DCE_OPCODE_COMPRESS_ENCRYPT:
+        case DCE_OPCODE_DECRYPT_DECOMPRESS:
         case DCE_OPCODE_COMPRESS:
         case DCE_OPCODE_DECOMPRESS: dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
