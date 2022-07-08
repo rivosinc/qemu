@@ -9,10 +9,9 @@
 #include <signal.h>
 #include "lz4.h"
 
-#include "qemu/osdep.h"
-#include "crypto/init.h"
-#include "crypto/xts.h"
-#include "crypto/aes.h"
+#include <openssl/conf.h>
+#include <openssl/evp.h>
+#include <openssl/err.h>
 
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
@@ -78,33 +77,6 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     completion = FIELD_DP64(completion, DCE_COMPLETION, STATUS, status);
     completion = FIELD_DP64(completion, DCE_COMPLETION, VALID, 1);
     return completion;
-}
-
-struct TestAES {
-    AES_KEY enc;
-    AES_KEY dec;
-};
-
-/* Crypto Functions */
-static void test_xts_aes_encrypt(const void *ctx,
-                                 size_t length,
-                                 uint8_t *dst,
-                                 const uint8_t *src)
-{
-    const struct TestAES *aesctx = ctx;
-
-    AES_encrypt(src, dst, &aesctx->enc);
-}
-
-
-static void test_xts_aes_decrypt(const void *ctx,
-                                 size_t length,
-                                 uint8_t *dst,
-                                 const uint8_t *src)
-{
-    const struct TestAES *aesctx = ctx;
-
-    AES_decrypt(src, dst, &aesctx->dec);
 }
 
 /* Data processing functions */
@@ -321,6 +293,103 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     }
 }
 
+static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_len,
+                       const uint8_t * cipher_key, const uint8_t * iv,
+                       uint8_t * cipher_text)
+{
+    if ((plain_text == NULL) ||
+        (cipher_text == NULL) ||
+        (cipher_key == NULL) ||
+        (plain_text_len == 0)) {
+        return -1;
+    }
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+
+    if (ctx == NULL) {
+        return -2;
+    }
+
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_xts(), NULL, cipher_key, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -3;
+    }
+    if (EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -4;
+    }
+
+    int encrypted_length = 0;
+
+    if (EVP_EncryptUpdate(ctx, cipher_text, &encrypted_length, plain_text, plain_text_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -5;
+    }
+
+    if (encrypted_length != plain_text_len) {
+        int final_length = 0;
+        if (EVP_EncryptFinal_ex(ctx, cipher_text + encrypted_length, &final_length) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return -6;
+        }
+        encrypted_length += final_length;
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+    if (encrypted_length != plain_text_len) {
+        return -7;
+    }
+    return encrypted_length;
+}
+
+static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text_len,
+                        const uint8_t * cipher_key, const uint8_t * iv,
+                        uint8_t * plain_text)
+{
+    if ((plain_text == NULL) ||
+        (cipher_text == NULL) ||
+        (cipher_key == NULL) ||
+        (cipher_text_len == 0)) {
+        return -1;
+    }
+
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+
+    if (ctx == NULL) {
+        return -2;
+    }
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_xts(), NULL, cipher_key, NULL) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -3;
+    }
+    if (EVP_DecryptInit_ex(ctx, NULL, NULL, NULL, iv) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -4;
+    }
+
+    int decrypted_length = 0;
+
+    if (EVP_DecryptUpdate(ctx, plain_text, &decrypted_length, cipher_text, cipher_text_len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return -5;
+    }
+
+    if (decrypted_length != cipher_text_len) {
+        int final_length = 0;
+        if (EVP_EncryptFinal_ex(ctx, plain_text + decrypted_length, &final_length) != 1) {
+            EVP_CIPHER_CTX_free(ctx);
+            return -6;
+        }
+        decrypted_length += final_length;
+    }
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    if (decrypted_length != cipher_text_len) {
+        return -7;
+    }
+    return decrypted_length;
+}
+
 static void dce_crypto(DCEState *state,
                        struct DCEDescriptor *descriptor,
                        unsigned char * src, unsigned char * dest,
@@ -328,9 +397,8 @@ static void dce_crypto(DCEState *state,
 
     /* TODO sanity check the size / alignment */
     printf("In %s\n", __func__);
-    uint8_t Torg[16], T[16];
-    struct TestAES aesdata;
-    struct TestAES aestweak;
+    uint8_t Torg[16], T[16], key[64];
+
     // FIXME: fixed seqnum / IV
     uint64_t seq = 0xbaddcafe;
     /*
@@ -341,30 +409,23 @@ static void dce_crypto(DCEState *state,
     uint8_t sec_kid = key_ids[0];
     uint8_t tweak_kid = key_ids[1];
 
-    /* setup the encryption keys */
-    AES_set_encrypt_key(state->keys[sec_kid], DCE_AES_KEYLEN / 2 * 8,
-                        &aesdata.enc);
-    AES_set_decrypt_key(state->keys[sec_kid], DCE_AES_KEYLEN / 2 * 8,
-                        &aesdata.dec);
-    AES_set_encrypt_key(state->keys[tweak_kid], DCE_AES_KEYLEN / 2 * 8,
-                        &aestweak.enc);
-    AES_set_decrypt_key(state->keys[tweak_kid], DCE_AES_KEYLEN / 2 * 8,
-                        &aestweak.dec);
+    /* setup the encryption keys*/
+    memcpy(key, state->keys[sec_kid], 32);
+    memcpy(key + 32, state->keys[tweak_kid], 32);
 
     /* setting up IV */
     memcpy(Torg, &seq, 8);
     memset(Torg + 8, 0, 8);
     memcpy(T, Torg, sizeof(T));
+
     if (is_encrypt) {
-        xts_encrypt(&aesdata, &aestweak,
-                    test_xts_aes_encrypt,
-                    test_xts_aes_decrypt,
-                    T, size, dest, src);
+        if (encrypt_aes_xts_256(src, size, key, T, dest) < 0) {
+            printf("ERROR:Encrypt failed!\n");
+        }
     } else {
-        xts_decrypt(&aesdata, &aestweak,
-                    test_xts_aes_encrypt,
-                    test_xts_aes_decrypt,
-                    T, size, dest, src);
+         if (decrypt_aes_xts_256(src, size, key, T, dest) < 0) {
+            printf("ERROR:Decrypt failed!\n");
+        }
     }
 }
 
@@ -401,7 +462,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
         get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
                               &curr_src_size, src_is_list, src_size);
         err |= pci_dma_read(&state->dev, curr_src_ptr++,
-                            &src_local[bytes_finished], 8);
+                            &src_local[bytes_finished], 1);
         if (err) break;
         bytes_finished++;
         if (--curr_src_size == 0) curr_src += 16;
@@ -457,7 +518,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     while(bytes_finished < compress_res) {
         get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
                               &curr_dest_size, dest_is_list, compress_res);
-        err |= pci_dma_write(&state->dev, curr_dest_ptr++, &dest_local[bytes_finished], 8);
+        err |= pci_dma_write(&state->dev, curr_dest_ptr++, &dest_local[bytes_finished], 1);
         if (err) break;
         bytes_finished++;
         if (--curr_dest_size == 0) curr_dest += 16;
