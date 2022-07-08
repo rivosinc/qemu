@@ -461,11 +461,11 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     while(bytes_finished < src_size) {
         get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
                               &curr_src_size, src_is_list, src_size);
-        err |= pci_dma_read(&state->dev, curr_src_ptr++,
-                            &src_local[bytes_finished], 1);
+        err |= pci_dma_read(&state->dev, curr_src_ptr,
+                            &src_local[bytes_finished], curr_src_size);
         if (err) break;
-        bytes_finished++;
-        if (--curr_src_size == 0) curr_src += 16;
+        bytes_finished += curr_src_size;
+        curr_src += 16;
     }
 
     /* perform compression / decompression */
@@ -518,10 +518,11 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     while(bytes_finished < compress_res) {
         get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
                               &curr_dest_size, dest_is_list, compress_res);
-        err |= pci_dma_write(&state->dev, curr_dest_ptr++, &dest_local[bytes_finished], 1);
+        err |= pci_dma_write(&state->dev, curr_dest_ptr++,
+                             &dest_local[bytes_finished], curr_dest_size);
         if (err) break;
-        bytes_finished++;
-        if (--curr_dest_size == 0) curr_dest += 16;
+        bytes_finished += curr_dest_size;
+        curr_dest += 16;
     }
     free(src_local);
     free(dest_local);
