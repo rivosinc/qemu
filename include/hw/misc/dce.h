@@ -88,6 +88,14 @@ typedef struct DCEDescriptor {
 #define DCE_OPCODE_DECRYPT_DECOMPRESS 10
 #define DCE_OPCODE_COMPRESS_ENCRYPT   11
 
+enum {
+    RLE = 0,
+    Snappy,
+    LZ4,
+    GZIP,
+    ZSTD
+};
+
 // typedef struct DCEDescriptorRing {
 //     DCEDescriptor descriptors[9];
 // } QEMU_PACKED DCEDescriptorRing;
