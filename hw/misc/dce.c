@@ -395,7 +395,7 @@ static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text
     return decrypted_length;
 }
 
-static void dce_crypto(DCEState *state,
+static int dce_crypto(DCEState *state,
                        struct DCEDescriptor *descriptor,
                        unsigned char * src, unsigned char * dest,
                        uint64_t size, bool is_encrypt) {
@@ -403,6 +403,7 @@ static void dce_crypto(DCEState *state,
     /* TODO sanity check the size / alignment */
     printf("In %s\n", __func__);
     uint8_t Torg[16], T[16], key[64];
+    int err = 0;
 
     // FIXME: fixed seqnum / IV
     uint64_t seq = 0xbaddcafe;
@@ -424,14 +425,17 @@ static void dce_crypto(DCEState *state,
     memcpy(T, Torg, sizeof(T));
 
     if (is_encrypt) {
-        if (encrypt_aes_xts_256(src, size, key, T, dest) < 0) {
+        err = encrypt_aes_xts_256(src, size, key, T, dest);
+        if (err < 0) {
             printf("ERROR:Encrypt failed!\n");
         }
     } else {
-         if (decrypt_aes_xts_256(src, size, key, T, dest) < 0) {
+        err = decrypt_aes_xts_256(src, size, key, T, dest);
+        if (err < 0) {
             printf("ERROR:Decrypt failed!\n");
         }
     }
+    return err;
 }
 
 static int dce_compress(struct DCEDescriptor *descriptor, const char * src, char * dst,
@@ -560,29 +564,29 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             break;
         case DCE_OPCODE_ENCRYPT:
             /* TODO: other algorithm */
-            dce_crypto(state, descriptor, (uint8_t *)src_local,
+            err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, true);
             break;
         case DCE_OPCODE_DECRYPT:
             /* TODO: other algorithm */
-            dce_crypto(state, descriptor, (uint8_t *)src_local,
+            err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, false);
             break;
         case DCE_OPCODE_COMPRESS_ENCRYPT:
             intermediate = calloc(dest_size, 1);
-            compress_res = LZ4_compress_default(src_local, intermediate,
-                                                src_size, dest_size);
+            err |= dce_compress(descriptor, src_local, intermediate,
+                                src_size, &compress_res);
             printf("Compressed - %ld bytes\n", compress_res);
-            dce_crypto(state, descriptor, (uint8_t *)intermediate,
+            err |= dce_crypto(state, descriptor, (uint8_t *)intermediate,
                        (uint8_t *)dest_local, compress_res, true);
             free(intermediate);
             break;
         case DCE_OPCODE_DECRYPT_DECOMPRESS:
             intermediate = calloc(src_size, 1);
-            dce_crypto(state, descriptor, (uint8_t *)src_local,
+            err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)intermediate, src_size, false);
-            compress_res = LZ4_decompress_safe(intermediate, dest_local,
-                                                src_size, dest_size);
+            err |= dce_decompress(descriptor, intermediate, dest_local,
+                         src_size, &compress_res);
             printf("Decompressed - %ld bytes\n", compress_res);
             free(intermediate);
             break;
