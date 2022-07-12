@@ -73,7 +73,8 @@ typedef struct DCEDescriptor {
 } QEMU_PACKED DCEDescriptor;
 
 #define SRC_IS_LIST                 (1 << 1)
-#define DEST_IS_LIST                (1 << 2)
+#define SRC2_IS_LIST                (1 << 2)
+#define DEST_IS_LIST                (1 << 3)
 
 #define DCE_OPCODE_CLFLUSH            0
 #define DCE_OPCODE_MEMCPY             1

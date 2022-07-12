@@ -20,16 +20,6 @@
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
 
-typedef struct {
-    int keylen;
-    unsigned char key1[32];
-    unsigned char key2[32];
-    uint64_t seqnum;
-    unsigned long PTLEN;
-    unsigned char * PTX;
-    unsigned char * CTX;
-} QCryptoXTSTestData;
-
 typedef struct DCEState {
     PCIDevice dev;
     MemoryRegion mmio;
@@ -119,12 +109,9 @@ static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
     while(bytes_finished < size) {
         get_next_ptr_and_size(&state->dev, &src, &curr_ptr,
                               &curr_size, is_list, size);
-
         if (dir == TO_LOCAL)
-        {
             err |= pci_dma_read(&state->dev, curr_ptr,
                                 &local[bytes_finished], curr_size);
-        }
         else
             err |= pci_dma_write(&state->dev, curr_ptr,
                                  &local[bytes_finished], curr_size);
@@ -196,7 +183,7 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 
     err |= local_buffer_tranfer(state, local_buffer, dest, size,
                                 is_list, FROM_LOCAL);
-
+    free(local_buffer);
     int status = err ? STATUS_FAIL : STATUS_PASS;
     completion = populate_completion(status, 0, size);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
@@ -222,16 +209,14 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 
     int err = 0;
 
-    /* TODO: SRC2 is list is now seperate */
-    bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
-    printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
-          dest_is_list, src_is_list);
+    bool src2_is_list = (descriptor->ctrl & SRC2_IS_LIST) ? true : false;
+    bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
 
     err |= local_buffer_tranfer(state, src_local, src, size,
                                 src_is_list, TO_LOCAL);
     err |= local_buffer_tranfer(state, src2_local, src2, size,
-                                src_is_list, TO_LOCAL);
+                                src2_is_list, TO_LOCAL);
 
     for (int i = 0; i < size; i ++) {
         uint8_t result = src_local[i] ^ src2_local[i];
@@ -595,12 +580,13 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_MEMCPY:     dce_memcpy(state, &descriptor); break;
         case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
         case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
+        case DCE_OPCODE_COMPRESS:
+        case DCE_OPCODE_DECOMPRESS:
         case DCE_OPCODE_ENCRYPT:
         case DCE_OPCODE_DECRYPT:
-        case DCE_OPCODE_COMPRESS_ENCRYPT:
         case DCE_OPCODE_DECRYPT_DECOMPRESS:
-        case DCE_OPCODE_COMPRESS:
-        case DCE_OPCODE_DECOMPRESS: dce_data_process(state, &descriptor); break;
+        case DCE_OPCODE_COMPRESS_ENCRYPT:
+            dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
         case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
     }
