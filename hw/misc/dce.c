@@ -27,16 +27,14 @@ typedef struct DCEState
 
     bool enable;
 
-    uint32_t irq_status;
-
     uint64_t descriptor_ring_ctrl_base;
     uint64_t descriptor_ring_ctrl_limit;
     uint64_t descriptor_ring_ctrl_head;
     uint64_t descriptor_ring_ctrl_tail;
 
     InterruptSourceInfo interrupt_source_infos[DCE_INTERRUPT_MAX];
-    uint64_t interrupt_mask;
-    uint64_t interrupt_status;
+    uint64_t irq_mask;
+    uint64_t irq_status;
 
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
@@ -751,24 +749,24 @@ static uint64_t write_interrupt_config(DCEState *state, int offset, uint64_t val
     return result;
 }
 
-static uint64_t read_interrupt_status(DCEState *state, int offset, unsigned size)
+static uint64_t read_irq_status(DCEState *state, int offset, unsigned size)
 {
-    return extract64(state->interrupt_status, offset * 8, size * 8);
+    return extract64(state->irq_status, offset * 8, size * 8);
 }
 
-static void write_interrupt_status(DCEState *state, int offset, uint64_t val, unsigned size)
+static void write_irq_status(DCEState *state, int offset, uint64_t val, unsigned size)
 {
-    state->interrupt_status = deposit64(state->interrupt_status, offset * 8, size * 8, state->interrupt_status & ~val);
+    state->irq_status = deposit64(state->irq_status, offset * 8, size * 8, state->irq_status & ~val);
 }
 
-static uint64_t read_interrupt_mask(DCEState *state, int offset, unsigned size)
+static uint64_t read_irq_mask(DCEState *state, int offset, unsigned size)
 {
-    return extract64(state->interrupt_mask, offset * 8, size * 8);
+    return extract64(state->irq_mask, offset * 8, size * 8);
 }
 
-static void write_interrupt_mask(DCEState *state, int offset, uint64_t val, unsigned size)
+static void write_irq_mask(DCEState *state, int offset, uint64_t val, unsigned size)
 {
-    state->interrupt_mask = deposit64(state->interrupt_mask, offset * 8, size * 8, val);
+    state->irq_mask = deposit64(state->irq_mask, offset * 8, size * 8, val);
 }
 
 #define TYPE_PCI_DCE_DEVICE "dce"
@@ -798,8 +796,8 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_TIMEOUT);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_ERROR_CONDITION);
-    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       result = read_interrupt_status          (state, offset, size);
-    if (reg_addr == A_DCE_INTERRUPT_MASK)                         result = read_interrupt_mask            (state, offset, size);
+    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       result = read_irq_status          (state, offset, size);
+    if (reg_addr == A_DCE_INTERRUPT_MASK)                         result = read_irq_mask            (state, offset, size);
 
 
     return result;
@@ -822,8 +820,8 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned siz
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_TIMEOUT);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_ERROR_CONDITION);
-    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       write_interrupt_status          (state, offset, val, size);
-    if (reg_addr == A_DCE_INTERRUPT_MASK)                         write_interrupt_mask            (state, offset, val, size);
+    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       write_irq_status          (state, offset, val, size);
+    if (reg_addr == A_DCE_INTERRUPT_MASK)                         write_irq_mask            (state, offset, val, size);
 }
 
 static const MemoryRegionOps dce_mmio_ops = {
