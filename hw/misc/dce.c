@@ -20,7 +20,8 @@
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
 
-typedef struct DCEState {
+typedef struct DCEState
+{
     PCIDevice dev;
     MemoryRegion mmio;
 
@@ -64,7 +65,8 @@ static inline bool interrupt_on_completion(struct DCEDescriptor *descriptor)
     return descriptor->ctrl & 1;
 }
 
-static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data) {
+static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
+{
     uint64_t completion = 0;
     completion = FIELD_DP64(completion, DCE_COMPLETION, DATA, data);
     completion = FIELD_DP64(completion, DCE_COMPLETION, SPEC, spec);
@@ -76,7 +78,8 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
 /* Data processing functions */
 static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
                                   uint64_t * curr_ptr, uint64_t * curr_size,
-                                  bool is_list, size_t size) {
+                                  bool is_list, size_t size)
+{
     int err = 0;
     uint64_t next_level_entry = *entry;
     if (is_list) {
@@ -156,7 +159,6 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 
 static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    printf("Inside %s, dest is 0x%lx\n", __func__, descriptor->dest);
     uint64_t completion = 0;
     uint64_t pattern1 = descriptor->operand2;
     uint64_t pattern2 = descriptor->operand3;
@@ -245,7 +247,6 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     free(src_local);
     free(src2_local);
     free(dest_local);
-
 }
 
 static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_len,
@@ -349,15 +350,14 @@ static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text
 static int dce_crypto(DCEState *state,
                        struct DCEDescriptor *descriptor,
                        unsigned char * src, unsigned char * dest,
-                       uint64_t size, int is_encrypt) {
+                       uint64_t size, int is_encrypt)
+{
 
     /* TODO sanity check the size / alignment */
     printf("In %s\n", __func__);
-    uint8_t Torg[16], T[16], key[64];
+    uint8_t iv[16], key[64];
     int err = 0, ret = 0;
 
-    // FIXME: fixed seqnum / IV
-    uint64_t seq = 0xbaddcafe;
     /*
      * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
      * | HASH KID | TWEAKIV ID | TWEAK KID | SEC KID |
@@ -365,24 +365,23 @@ static int dce_crypto(DCEState *state,
     uint8_t * key_ids = (uint8_t *)&descriptor->operand3;
     uint8_t sec_kid = key_ids[0];
     uint8_t tweak_kid = key_ids[1];
+    uint8_t iv_kid = key_ids[2];
 
     /* setup the encryption keys*/
     memcpy(key, state->keys[sec_kid], 32);
     memcpy(key + 32, state->keys[tweak_kid], 32);
 
     /* setting up IV */
-    memcpy(Torg, &seq, 8);
-    memset(Torg + 8, 0, 8);
-    memcpy(T, Torg, sizeof(T));
+    memcpy(iv, state->keys[iv_kid], 16);
 
     if (is_encrypt == ENCRYPT) {
-        ret = encrypt_aes_xts_256(src, size, key, T, dest);
+        ret = encrypt_aes_xts_256(src, size, key, iv, dest);
         if (ret < 0) {
             printf("ERROR:Encrypt failed!\n");
             return -1;
         }
     } else {
-        ret = decrypt_aes_xts_256(src, size, key, T, dest);
+        ret = decrypt_aes_xts_256(src, size, key, iv, dest);
         if (ret < 0) {
             printf("ERROR:Decrypt failed!\n");
             return -1;
@@ -550,14 +549,16 @@ cleanup:
 
 }
 
-static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor) {
+static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor)
+{
     printf("In %s\n", __func__);
     unsigned char * key = state->keys[descriptor->dest];
     uint64_t * src = (uint64_t *)descriptor->source;
     pci_dma_read(&state->dev, (dma_addr_t)src, key, DCE_AES_KEYLEN);
 }
 
-static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor) {
+static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
+{
     printf("In %s\n", __func__);
     unsigned char * key = state->keys[descriptor->dest];
     memset(key, 0, DCE_AES_KEYLEN);
@@ -762,15 +763,9 @@ static void write_interrupt_mask(DCEState *state, int offset, uint64_t val, unsi
 #define TYPE_PCI_DCE_DEVICE "dce"
 DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
-static void dce_instance_init(Object *obj)
-{
+static void dce_instance_init(Object *obj) {}
 
-}
-
-static void dce_uninit(PCIDevice *dev)
-{
-
-}
+static void dce_uninit(PCIDevice *dev) {}
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
