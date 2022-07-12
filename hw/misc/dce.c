@@ -403,7 +403,7 @@ static int dce_crypto(DCEState *state,
     /* TODO sanity check the size / alignment */
     printf("In %s\n", __func__);
     uint8_t Torg[16], T[16], key[64];
-    int err = 0;
+    int err = 0, ret = 0;
 
     // FIXME: fixed seqnum / IV
     uint64_t seq = 0xbaddcafe;
@@ -425,14 +425,16 @@ static int dce_crypto(DCEState *state,
     memcpy(T, Torg, sizeof(T));
 
     if (is_encrypt) {
-        err = encrypt_aes_xts_256(src, size, key, T, dest);
-        if (err < 0) {
+        ret = encrypt_aes_xts_256(src, size, key, T, dest);
+        if (ret < 0) {
             printf("ERROR:Encrypt failed!\n");
+            return -1;
         }
     } else {
-        err = decrypt_aes_xts_256(src, size, key, T, dest);
-        if (err < 0) {
+        ret = decrypt_aes_xts_256(src, size, key, T, dest);
+        if (ret < 0) {
             printf("ERROR:Decrypt failed!\n");
+            return -1;
         }
     }
     return err;
@@ -507,12 +509,11 @@ static int dce_decompress(struct DCEDescriptor *descriptor, const char * src, ch
     if(err) printf("ERROR: %d\n", err);
     return err;
 }
-
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size;
     uint64_t completion;
-    size_t compress_res, err = 0, bytes_finished = 0;
+    size_t post_process_size, err = 0, bytes_finished = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
     char * dest_local;
@@ -536,7 +537,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
         dest_size = descriptor->operand2;
     }
     dest_local = calloc(dest_size, 1);
-    compress_res = dest_size;
+    post_process_size = dest_size;
 
     /* copy to local buffer */
     while(bytes_finished < src_size) {
@@ -546,6 +547,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
                             &src_local[bytes_finished], curr_src_size);
         if (err) break;
         bytes_finished += curr_src_size;
+        curr_src_size = 0;
         curr_src += 16;
     }
 
@@ -554,31 +556,36 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     {
         case DCE_OPCODE_COMPRESS:
             err |= dce_compress(descriptor, src_local, dest_local,
-                         src_size, &compress_res);
-            printf("Compressed - %ld bytes\n", compress_res);
+                         src_size, &post_process_size);
+            printf("Compressed - %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECOMPRESS:
             err |= dce_decompress(descriptor, src_local, dest_local,
-                         src_size, &compress_res);
-            printf("Decompressed - %ld bytes\n", compress_res);
+                         src_size, &post_process_size);
+            printf("Decompressed - %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_ENCRYPT:
             /* TODO: other algorithm */
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, true);
+            if (!err) post_process_size = src_size;
+            printf("Encrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECRYPT:
+
             /* TODO: other algorithm */
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, false);
+            if (!err) post_process_size = src_size;
+            printf("Decrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_COMPRESS_ENCRYPT:
             intermediate = calloc(dest_size, 1);
             err |= dce_compress(descriptor, src_local, intermediate,
-                                src_size, &compress_res);
-            printf("Compressed - %ld bytes\n", compress_res);
+                                src_size, &post_process_size);
+            printf("Compressed - %ld bytes\n", post_process_size);
             err |= dce_crypto(state, descriptor, (uint8_t *)intermediate,
-                       (uint8_t *)dest_local, compress_res, true);
+                       (uint8_t *)dest_local, post_process_size, true);
             free(intermediate);
             break;
         case DCE_OPCODE_DECRYPT_DECOMPRESS:
@@ -586,30 +593,38 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)intermediate, src_size, false);
             err |= dce_decompress(descriptor, intermediate, dest_local,
-                         src_size, &compress_res);
-            printf("Decompressed - %ld bytes\n", compress_res);
+                         src_size, &post_process_size);
+            printf("Decompressed - %ld bytes\n", post_process_size);
             free(intermediate);
             break;
         default:
             break;
     }
-    err |= (compress_res == 0);
+    err |= (post_process_size == 0);
+    if (err) goto cleanup;
     /* copy back the results */
     bytes_finished = 0;
-    while(bytes_finished < compress_res) {
+    while(bytes_finished < post_process_size) {
         get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
-                              &curr_dest_size, dest_is_list, compress_res);
+                              &curr_dest_size, dest_is_list, post_process_size);
         err |= pci_dma_write(&state->dev, curr_dest_ptr++,
                              &dest_local[bytes_finished], curr_dest_size);
+        // this line has issue
         if (err) break;
         bytes_finished += curr_dest_size;
+        curr_dest_size = 0;
         curr_dest += 16;
     }
+
+cleanup:
     free(src_local);
     free(dest_local);
 
-    status = (err == 0) ? STATUS_PASS : STATUS_FAIL;
-    completion = populate_completion(status, 0, compress_res);
+    if (err) {
+        printf("ERROR: operation has failed!\n");
+        status = STATUS_FAIL;
+    }
+    completion = populate_completion(status, 0, post_process_size);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 
 }
