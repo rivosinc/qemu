@@ -107,6 +107,10 @@ enum {
     DECOMPRESS
 };
 
+enum {
+    ENCRYPT,
+    DECRYPT
+};
 // typedef struct DCEDescriptorRing {
 //     DCEDescriptor descriptors[9];
 // } QEMU_PACKED DCEDescriptorRing;
