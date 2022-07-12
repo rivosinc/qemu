@@ -122,7 +122,6 @@ static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
 
         if (dir == TO_LOCAL)
         {
-            printf("copying %lx bytes from 0x%lx\n", curr_size, curr_ptr);
             err |= pci_dma_read(&state->dev, curr_ptr,
                                 &local[bytes_finished], curr_size);
         }
@@ -130,7 +129,7 @@ static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
             err |= pci_dma_write(&state->dev, curr_ptr,
                                  &local[bytes_finished], curr_size);
         if (err) {
-            printf("ERROR! Addr 0x%lx\n", curr_ptr);
+            printf("ERROR: %s Addr 0x%lx\n", __func__, curr_ptr);
             break;
         }
         bytes_finished += curr_size;
@@ -494,15 +493,14 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size;
     uint64_t completion;
-    size_t post_process_size, err = 0, bytes_finished = 0;
+    size_t post_process_size, err = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
     char * dest_local;
     char * intermediate;
-    uint64_t curr_dest_ptr, curr_src_ptr;
-    uint64_t curr_dest_size = 0, curr_src_size = 0;
-    hwaddr curr_dest = descriptor->dest;
-    hwaddr curr_src = descriptor->source;
+
+    hwaddr dest = descriptor->dest;
+    hwaddr src = descriptor->source;
     int status;
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
@@ -521,16 +519,8 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     post_process_size = dest_size;
 
     /* copy to local buffer */
-    while(bytes_finished < src_size) {
-        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
-                              &curr_src_size, src_is_list, src_size);
-        err |= pci_dma_read(&state->dev, curr_src_ptr,
-                            &src_local[bytes_finished], curr_src_size);
-        if (err) break;
-        bytes_finished += curr_src_size;
-        curr_src_size = 0;
-        curr_src += 16;
-    }
+    local_buffer_tranfer(state, (uint8_t *)src_local, src, src_size,
+                         src_is_list, TO_LOCAL);
 
     /* perform compression / decompression */
     switch(descriptor->opcode)
@@ -584,18 +574,8 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     err |= (post_process_size == 0);
     if (err) goto cleanup;
     /* copy back the results */
-    bytes_finished = 0;
-    while(bytes_finished < post_process_size) {
-        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
-                              &curr_dest_size, dest_is_list, post_process_size);
-        err |= pci_dma_write(&state->dev, curr_dest_ptr++,
-                             &dest_local[bytes_finished], curr_dest_size);
-        // this line has issue
-        if (err) break;
-        bytes_finished += curr_dest_size;
-        curr_dest_size = 0;
-        curr_dest += 16;
-    }
+    local_buffer_tranfer(state, (uint8_t *)dest_local, dest, dest_size,
+                         dest_is_list, FROM_LOCAL);
 
 cleanup:
     free(src_local);

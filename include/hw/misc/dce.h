@@ -96,6 +96,11 @@ enum {
     ZSTD
 };
 
+enum {
+    TO_LOCAL,
+    FROM_LOCAL
+};
+
 // typedef struct DCEDescriptorRing {
 //     DCEDescriptor descriptors[9];
 // } QEMU_PACKED DCEDescriptorRing;
