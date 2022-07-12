@@ -176,43 +176,29 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
     // TODO: ENUM
     bool is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     int size = descriptor->operand1;
-    hwaddr curr_dest = descriptor->dest;
-    int bytes_finished = 0;
-    uint64_t curr_size = 0;
-    uint64_t curr_ptr = curr_dest;
-    bool fault = false;
+    hwaddr dest = descriptor->dest;
+    uint8_t * local_buffer = calloc(1, size);
+    int err = 0;
 
-    while((bytes_finished < size) || fault) {
-        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_ptr,
-                              &curr_size, is_list, size);
-
-        while(curr_size > 0)
-        {
-            uint8_t * temp;
-            int pattern_offset = bytes_finished % 16;
-            if (pattern_offset < 8) {
-                temp = (uint8_t *)&pattern1;
-            }
-            else {
-                pattern_offset -= 8;
-                temp = (uint8_t *)&pattern2;
-            }
-            temp += pattern_offset;
-            if (pci_dma_write(&state->dev, curr_ptr++, temp, 1)) {
-                printf("ERROR! Addr 0x%lx\n", curr_ptr);
-                fault = true;
-                // TODO better error handling
-                break;
-            }
-            curr_size--;
-            bytes_finished++;
+    for (int i = 0; i < size; i++) {
+        uint8_t * temp;
+        int pattern_offset = i % 16;
+        if (pattern_offset < 8) {
+            temp = (uint8_t *)&pattern1;
         }
-        /* move to next entry if it is a list */
-        curr_dest += 16;
+        else {
+            pattern_offset -= 8;
+            temp = (uint8_t *)&pattern2;
+        }
+        temp += pattern_offset;
+        local_buffer[i] = *temp;
     }
 
-    int status = fault ? STATUS_FAIL : STATUS_PASS;
-    completion = populate_completion(status, 0, 0);
+    err |= local_buffer_tranfer(state, local_buffer, dest, size,
+                                is_list, FROM_LOCAL);
+
+    int status = err ? STATUS_FAIL : STATUS_PASS;
+    completion = populate_completion(status, 0, size);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
