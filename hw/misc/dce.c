@@ -406,8 +406,9 @@ static int dce_crypto(DCEState *state,
     return err;
 }
 
-static int dce_compress(struct DCEDescriptor *descriptor, const char * src, char * dst,
-                 size_t src_size, size_t * dst_size)
+static int dce_compress_decompress(struct DCEDescriptor *descriptor,
+                                   const char * src, char * dst,
+                                   size_t src_size, size_t * dst_size, int dir)
 {
     int err = 0;
     /* bit 1-3 in opernad 0 specify the compression format */
@@ -416,23 +417,46 @@ static int dce_compress(struct DCEDescriptor *descriptor, const char * src, char
         case RLE:
             break;
         case Snappy:
-            printf("Compressing using Snappy!");
-            err = snappy_compress(src, src_size, dst, dst_size);
+            if (dir == COMPRESS) {
+                printf("Compressing using Snappy!");
+                err = snappy_compress(src, src_size, dst, dst_size);
+            } else {
+                printf("Decompressing using Snappy!\n");
+                err = snappy_uncompress(src, src_size, dst, dst_size);
+            }
             break;
         case LZ4:
-            printf("Compressing using LZ4!\n");
-            *dst_size = LZ4_compress_default(src, dst,
-                                             src_size, *dst_size);
+            if (dir == COMPRESS) {
+                printf("Compressing using LZ4!\n");
+                *dst_size = LZ4_compress_default(src, dst,
+                                                 src_size, *dst_size);
+            } else {
+                printf("Decompressing using LZ4!\n");
+                *dst_size = LZ4_decompress_safe(src, dst,
+                                                src_size, *dst_size);
+            }
             break;
         case GZIP:
-            printf("Compressing using GZIP!\n");
-            err = compress((Bytef *)dst, dst_size,
-                           (Bytef *)src, src_size);
+            if (dir == COMPRESS) {
+                printf("Compressing using GZIP!\n");
+                err = compress((Bytef *)dst, dst_size,
+                               (Bytef *)src, src_size);
+            } else {
+                printf("Decompressing using GZIP!\n");
+                err = uncompress((Bytef *)dst, dst_size,
+                                 (Bytef *)src, src_size);
+            }
             break;
         case ZSTD:
-            printf("Compressing using ZSTD!\n");
-            *dst_size = ZSTD_compress(dst, *dst_size,
-                                      src, src_size, 1);
+            if (dir == COMPRESS) {
+                printf("Compressing using ZSTD!\n");
+                *dst_size = ZSTD_compress(dst, *dst_size,
+                                          src, src_size, 1);
+            } else {
+                printf("Decompressing using ZSTD!\n");
+                *dst_size = ZSTD_decompress(dst, *dst_size,
+                                            src, src_size);
+            }
             break;
         default:
             return -1;
@@ -441,40 +465,6 @@ static int dce_compress(struct DCEDescriptor *descriptor, const char * src, char
     return err;
 }
 
-static int dce_decompress(struct DCEDescriptor *descriptor, const char * src, char * dst,
-                 size_t src_size, size_t * dst_size)
-{
-    int err = 0;
-    /* bit 1-3 in opernad 0 specify the compression format */
-    int comp_format = (descriptor->operand0 >> 1) & 0x7;
-    switch(comp_format) {
-        case RLE:
-            break;
-        case Snappy:
-            printf("Decompressing using Snappy!\n");
-            err = snappy_uncompress(src, src_size, dst, dst_size);
-            break;
-        case LZ4:
-            printf("Decompressing using LZ4!\n");
-            *dst_size = LZ4_decompress_safe(src, dst,
-                                             src_size, *dst_size);
-            break;
-        case GZIP:
-            printf("Decompressing using GZIP!\n");
-            err = uncompress((Bytef *)dst, dst_size,
-                             (Bytef *)src, src_size);
-            break;
-        case ZSTD:
-            printf("Decompressing using ZSTD!\n");
-            *dst_size = ZSTD_decompress(dst, *dst_size,
-                                        src, src_size);
-            break;
-        default:
-            return -1;
-    }
-    if(err) printf("ERROR: %d\n", err);
-    return err;
-}
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) {
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size;
@@ -512,13 +502,15 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
     switch(descriptor->opcode)
     {
         case DCE_OPCODE_COMPRESS:
-            err |= dce_compress(descriptor, src_local, dest_local,
-                         src_size, &post_process_size);
+            err |= dce_compress_decompress(descriptor, src_local, dest_local,
+                                           src_size, &post_process_size,
+                                           COMPRESS);
             printf("Compressed - %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECOMPRESS:
-            err |= dce_decompress(descriptor, src_local, dest_local,
-                         src_size, &post_process_size);
+            err |= dce_compress_decompress(descriptor, src_local, dest_local,
+                                           src_size, &post_process_size,
+                                           DECOMPRESS);
             printf("Decompressed - %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_ENCRYPT:
@@ -538,8 +530,9 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             break;
         case DCE_OPCODE_COMPRESS_ENCRYPT:
             intermediate = calloc(dest_size, 1);
-            err |= dce_compress(descriptor, src_local, intermediate,
-                                src_size, &post_process_size);
+            err |= dce_compress_decompress(descriptor, src_local, intermediate,
+                                           src_size, &post_process_size,
+                                           COMPRESS);
             printf("Compressed - %ld bytes\n", post_process_size);
             err |= dce_crypto(state, descriptor, (uint8_t *)intermediate,
                        (uint8_t *)dest_local, post_process_size, true);
@@ -549,8 +542,9 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor) 
             intermediate = calloc(src_size, 1);
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)intermediate, src_size, false);
-            err |= dce_decompress(descriptor, intermediate, dest_local,
-                         src_size, &post_process_size);
+            err |= dce_compress_decompress(descriptor, intermediate, dest_local,
+                                           src_size, &post_process_size,
+                                           DECOMPRESS);
             printf("Decompressed - %ld bytes\n", post_process_size);
             free(intermediate);
             break;

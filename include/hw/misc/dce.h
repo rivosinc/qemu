@@ -101,6 +101,11 @@ enum {
     FROM_LOCAL
 };
 
+enum {
+    COMPRESS,
+    DECOMPRESS
+};
+
 // typedef struct DCEDescriptorRing {
 //     DCEDescriptor descriptors[9];
 // } QEMU_PACKED DCEDescriptorRing;
