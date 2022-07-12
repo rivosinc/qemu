@@ -87,8 +87,6 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
 static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
                                   uint64_t * curr_ptr, uint64_t * curr_size,
                                   bool is_list, size_t size) {
-    if (*curr_size != 0)
-        return;
     int err = 0;
     uint64_t next_level_entry = *entry;
     if (is_list) {
@@ -112,54 +110,61 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     }
 }
 
+static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
+                                size_t size,bool is_list, int dir)
+{
+    int err = 0, bytes_finished = 0;
+    uint64_t curr_ptr;
+    uint64_t curr_size = 0;
+    while(bytes_finished < size) {
+        get_next_ptr_and_size(&state->dev, &src, &curr_ptr,
+                              &curr_size, is_list, size);
+
+        if (dir == TO_LOCAL)
+        {
+            printf("copying %lx bytes from 0x%lx\n", curr_size, curr_ptr);
+            err |= pci_dma_read(&state->dev, curr_ptr,
+                                &local[bytes_finished], curr_size);
+        }
+        else
+            err |= pci_dma_write(&state->dev, curr_ptr,
+                                 &local[bytes_finished], curr_size);
+        if (err) {
+            printf("ERROR! Addr 0x%lx\n", curr_ptr);
+            break;
+        }
+        bytes_finished += curr_size;
+        if (err) break;
+        /* increment the pointer to the next entry if this one is exhausted */
+        src += 16;
+    }
+    return err;
+}
+
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
     uint64_t completion = 0;
     int status;
     uint64_t size = descriptor->operand1;
+    uint8_t * local_buffer = malloc(size);
 
-    int bytes_finished = 0;
-    uint64_t curr_dest_ptr, curr_src_ptr;
-    uint64_t curr_dest_size = 0, curr_src_size = 0;
-    hwaddr curr_dest = descriptor->dest;
-    hwaddr curr_src = descriptor->source;
-    printf("size is 0x%lx curr_dest: 0x%lx  curr_src: 0x%lx \n",
-          descriptor->operand1, curr_dest, curr_src);
+    hwaddr dest = descriptor->dest;
+    hwaddr src = descriptor->source;
     int err = 0;
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
-    printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
-          dest_is_list, src_is_list);
 
-    while(bytes_finished < size) {
-        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
-                              &curr_dest_size, dest_is_list, size);
-        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
-                              &curr_src_size, src_is_list, size);
-
-        /* Loop until either the source or the destination is exhausted */
-        while(curr_src_size > 0 && curr_dest_size > 0)
-        {
-            uint8_t temp;
-            err |= pci_dma_read (&state->dev, curr_src_ptr++ , &temp, 1);
-            err |= pci_dma_write(&state->dev, curr_dest_ptr++, &temp, 1);
-            if (err) {
-                printf("ERROR! Addr 0x%lx\n", curr_dest_ptr);
-                break;
-            }
-            curr_src_size--;
-            curr_dest_size--;
-            bytes_finished++;
-        }
-        if (err) break;
-        /* increment the pointer to the next entry if this one is exhausted */
-        if (curr_src_size == 0) curr_src += 16;
-        if (curr_dest_size == 0) curr_dest += 16;
-    }
+    /* copy to local buffer */
+    err |= local_buffer_tranfer(state, local_buffer, src,
+                                size, src_is_list, TO_LOCAL);
+    /* copy to dest from local buffer */
+    err |= local_buffer_tranfer(state, local_buffer, dest,
+                                size, dest_is_list, FROM_LOCAL);
     // TODO: fix completion
+    free(local_buffer);
     status = err ? STATUS_FAIL : STATUS_PASS;
-    completion = populate_completion(status, 0, 0);
+    completion = populate_completion(status, 0, size);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
@@ -219,82 +224,58 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     uint64_t size = descriptor->operand1;
     bool generate_bitmask = descriptor->operand0 & 1;
 
-    int bytes_finished = 0;
-    uint64_t curr_dest_ptr, curr_src_ptr, curr_src2_ptr;
-    uint64_t curr_dest_size = 0, curr_src_size = 0, curr_src2_size = 0;
-    hwaddr curr_dest = descriptor->dest;
-    hwaddr curr_src = descriptor->source;
-    hwaddr curr_src2 = descriptor->operand2;
-    bool fault = false;
-    bool finish_early = false;
+    hwaddr dest = descriptor->dest;
+    hwaddr src = descriptor->source;
+    hwaddr src2 = descriptor->operand2;
 
-    bool     diff_found = false;
+    uint8_t * src_local = malloc(size);
+    uint8_t * src2_local = malloc(size);
+    uint8_t * dest_local = calloc(1, size);
+
+    uint64_t diff_found = 0;
     uint32_t first_diff_index = 0;
 
-    printf("size is 0x%lx curr_src: 0x%lx  curr_src2: 0x%lx\n",
-          descriptor->operand1, curr_src, curr_src2);
     int err = 0;
 
+    /* TODO: SRC2 is list is now seperate */
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
     printf("Ctrl: 0x%x, dlist: %d, slist: %d\n", descriptor->ctrl,
           dest_is_list, src_is_list);
 
-    while(bytes_finished < size) {
-        get_next_ptr_and_size(&state->dev, &curr_dest, &curr_dest_ptr,
-                              &curr_dest_size, dest_is_list, size);
-        get_next_ptr_and_size(&state->dev, &curr_src, &curr_src_ptr,
-                              &curr_src_size, src_is_list, size);
-        get_next_ptr_and_size(&state->dev, &curr_src2, &curr_src2_ptr,
-                              &curr_src2_size, src_is_list, size);
-        /* Loop until either the source or the destination is exhausted */
-        while(curr_src_size > 0 && curr_src2_size > 0 &&curr_dest_size > 0)
-        {
-            uint8_t byte1, byte2;
-            pci_dma_read(&state->dev, curr_src_ptr++, &byte1, 1);
-            pci_dma_read(&state->dev, curr_src2_ptr++, &byte2, 1);
-            // printf("Compareing '%c' and '%c'\n", (char)byte1, (char)byte2);
-            uint8_t result = byte1 ^ byte2;
-            if (result != 0) {
-                if (result != 0xff) {
-                    printf("Byte1: %x Byte2: %x bytes_finished: %x\n", byte1,
-                           byte2, bytes_finished);
-                }
-                first_diff_index = diff_found ? first_diff_index : bytes_finished;
-                diff_found = true;
-                if (generate_bitmask) {
-                    pci_dma_write(&state->dev, curr_dest_ptr, &result, 1);
-                } else {
-                    finish_early = true;
-                    break;
-                }
-            }
-            if (err) {
-                printf("ERROR! Addr 0x%lx\n", curr_dest_ptr);
+    err |= local_buffer_tranfer(state, src_local, src, size,
+                                src_is_list, TO_LOCAL);
+    err |= local_buffer_tranfer(state, src2_local, src2, size,
+                                src_is_list, TO_LOCAL);
+
+    for (int i = 0; i < size; i ++) {
+        uint8_t result = src_local[i] ^ src2_local[i];
+        if (result != 0) {
+            first_diff_index = diff_found ? first_diff_index : i;
+            diff_found = 1;
+            if (generate_bitmask) {
+                dest_local[i] = result;
+            } else {
                 break;
             }
-            curr_dest_ptr++;
-            curr_src_size--;
-            curr_src2_size--;
-            curr_dest_size--;
-            bytes_finished++;
         }
-        if (err || finish_early) break;
-        /* increment the pointer to the next entry if this one is exhausted */
-        if (curr_src_size == 0) curr_src += 16;
-        if (curr_src2_size == 0) curr_src2 += 16;
-        if (curr_dest_size == 0) curr_dest += 16;
     }
-    // TODO: fix completion
+
+    if (generate_bitmask) {
+        err |= local_buffer_tranfer(state, dest_local, dest,
+                                    size, dest_is_list, FROM_LOCAL);
+    } else {
+        pci_dma_write(&state->dev, descriptor->dest, &diff_found, 8);
+    }
     first_diff_index = diff_found ? (1 << first_diff_index) : 0;
-    status = fault ? STATUS_FAIL : STATUS_PASS;
+    status = err ? STATUS_FAIL : STATUS_PASS;
     completion = populate_completion(status, 0, first_diff_index);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 
-    if (!generate_bitmask) {
-        uint64_t result = diff_found ? 1 : 0;
-        pci_dma_write(&state->dev, descriptor->dest, &result, 8);
-    }
+    free(src_local);
+    free(src2_local);
+    free(dest_local);
+
 }
 
 static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_len,
