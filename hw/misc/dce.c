@@ -27,6 +27,8 @@ typedef struct DCEState
 
     bool enable;
 
+    uint32_t irq_status;
+
     uint64_t descriptor_ring_ctrl_base;
     uint64_t descriptor_ring_ctrl_limit;
     uint64_t descriptor_ring_ctrl_head;
@@ -40,15 +42,26 @@ typedef struct DCEState
 	unsigned char keys[8][32];
 } DCEState;
 
-static void raise_interrupt(DCEState *state, DCEInterruptSource interrupt_source)
+static bool dce_msi_enabled(DCEState *state)
 {
-    if (state->interrupt_source_infos[interrupt_source].enable &&
-       (state->interrupt_mask & (1 << interrupt_source))) {
+    return msi_enabled(&state->dev);
+}
 
-        state->interrupt_status |= 1 << interrupt_source;
-        msi_notify(&state->dev, state->interrupt_source_infos[interrupt_source].vector_index);
+static void dce_raise_interrupt(DCEState *state, DCEInterruptSource val)
+{
+    printf("Issuing interrupt!\n");
+    state->irq_status |= val;
+    if (state->irq_status) {
+        if (dce_msi_enabled(state)) {
+            msi_notify(&state->dev, 0);
+        }
     }
 }
+
+// static void dce_lower_interrupt(DCEState *state, DCEInterruptSource val)
+// {
+//     state->irq_status &= ~val;
+// }
 
 static void reset(DCEState *state)
 {
@@ -60,9 +73,12 @@ static bool aligned(hwaddr addr, unsigned size)
     return addr % size == 0;
 }
 
-static inline bool interrupt_on_completion(struct DCEDescriptor *descriptor)
+static inline bool interrupt_on_completion(DCEState *state,
+                                           struct DCEDescriptor *descriptor)
 {
-    return descriptor->ctrl & 1;
+    printf("ctrl is 0x%x\n", descriptor->ctrl);
+    printf("MSI enabled? %d\n", dce_msi_enabled(state));
+    return ((descriptor->ctrl & 1) && dce_msi_enabled(state));
 }
 
 static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
@@ -73,6 +89,23 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
     completion = FIELD_DP64(completion, DCE_COMPLETION, STATUS, status);
     completion = FIELD_DP64(completion, DCE_COMPLETION, VALID, 1);
     return completion;
+}
+
+static void complete_workload(DCEState *state, struct DCEDescriptor *descriptor,
+                              int err, uint8_t spec, uint64_t data)
+{
+    int status = STATUS_PASS;
+    uint64_t completion = 0;
+
+    if (err) {
+        printf("ERROR: operation has failed!\n");
+        status = STATUS_FAIL;
+    }
+    completion = populate_completion(status, spec, data);
+    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+
+    if (interrupt_on_completion(state, descriptor))
+        dce_raise_interrupt(state, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
 }
 
 /* Data processing functions */
@@ -132,8 +165,6 @@ static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
 
 static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    uint64_t completion = 0;
-    int status;
     uint64_t size = descriptor->operand1;
     uint8_t * local_buffer = malloc(size);
 
@@ -150,16 +181,13 @@ static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
     /* copy to dest from local buffer */
     err |= local_buffer_tranfer(state, local_buffer, dest,
                                 size, dest_is_list, FROM_LOCAL);
-    // TODO: fix completion
+
+    complete_workload(state, descriptor, err, 0, size);
     free(local_buffer);
-    status = err ? STATUS_FAIL : STATUS_PASS;
-    completion = populate_completion(status, 0, size);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
 static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    uint64_t completion = 0;
     uint64_t pattern1 = descriptor->operand2;
     uint64_t pattern2 = descriptor->operand3;
 
@@ -185,16 +213,12 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
 
     err |= local_buffer_tranfer(state, local_buffer, dest, size,
                                 is_list, FROM_LOCAL);
+    complete_workload(state, descriptor, err, 0, size);
     free(local_buffer);
-    int status = err ? STATUS_FAIL : STATUS_PASS;
-    completion = populate_completion(status, 0, size);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
 }
 
 static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    uint64_t completion = 0;
-    int status;
     uint64_t size = descriptor->operand1;
     bool generate_bitmask = descriptor->operand0 & 1;
 
@@ -233,16 +257,14 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
         }
     }
 
-    if (generate_bitmask) {
+    if (generate_bitmask)
         err |= local_buffer_tranfer(state, dest_local, dest,
                                     size, dest_is_list, FROM_LOCAL);
-    } else {
+    else
         pci_dma_write(&state->dev, descriptor->dest, &diff_found, 8);
-    }
+
     first_diff_index = diff_found ? (1 << first_diff_index) : 0;
-    status = err ? STATUS_FAIL : STATUS_PASS;
-    completion = populate_completion(status, 0, first_diff_index);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+    complete_workload(state, descriptor, err, 0, first_diff_index);
 
     free(src_local);
     free(src2_local);
@@ -447,7 +469,6 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
 {
     uint64_t src_size = descriptor->operand1;
     uint64_t dest_size;
-    uint64_t completion;
     size_t post_process_size, err = 0;
     /* create local buffers used for LZ4 */
     char * src_local = malloc(src_size);
@@ -456,7 +477,6 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
 
     hwaddr dest = descriptor->dest;
     hwaddr src = descriptor->source;
-    int status;
 
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
@@ -537,16 +557,9 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
                          dest_is_list, FROM_LOCAL);
 
 cleanup:
+    complete_workload(state, descriptor, err, 0, post_process_size);
     free(src_local);
     free(dest_local);
-
-    if (err) {
-        printf("ERROR: operation has failed!\n");
-        status = STATUS_FAIL;
-    }
-    completion = populate_completion(status, 0, post_process_size);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
-
 }
 
 static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor)
@@ -555,6 +568,7 @@ static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor)
     unsigned char * key = state->keys[descriptor->dest];
     uint64_t * src = (uint64_t *)descriptor->source;
     pci_dma_read(&state->dev, (dma_addr_t)src, key, DCE_AES_KEYLEN);
+    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN);
 }
 
 static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
@@ -562,6 +576,7 @@ static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
     printf("In %s\n", __func__);
     unsigned char * key = state->keys[descriptor->dest];
     memset(key, 0, DCE_AES_KEYLEN);
+    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN);
 }
 
 static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
@@ -585,10 +600,6 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
             dce_data_process(state, &descriptor); break;
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
         case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
-    }
-
-    if (interrupt_on_completion(&descriptor)) {
-        raise_interrupt(state, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
     }
 }
 
@@ -837,8 +848,12 @@ static void dce_realize(PCIDevice *dev, Error **errp)
 
     pci_config_set_interrupt_pin(dev->config, 1);
 
-    if (msi_init(dev, 0, 1, true, false, errp)) {
-        return;
+    int ret = msi_init(&state->dev, 0, 1, true, false, errp);
+    if (ret == -ENOTSUP) {
+        printf("MSIX INIT FAILED\n");
+    }
+    else {
+        printf("MSIX INIT success\n");
     }
 
     // TODO: figure out the other qemu capabilities
