@@ -33,11 +33,11 @@ enum {
 };
 
 typedef enum DCEInterruptSource {
-    DCE_INTERRUPT_DESCRIPTOR_COMPLETION = 0,
-    DCE_INTERRUPT_TIMEOUT               = 1,
-    DCE_INTERRUPT_ERROR_CONDITION       = 2,
+    DCE_INTERRUPT_DESCRIPTOR_COMPLETION = 1,
+    DCE_INTERRUPT_TIMEOUT               = 2,
+    DCE_INTERRUPT_ERROR_CONDITION       = 3,
 
-    DCE_INTERRUPT_MAX                   = 3
+    DCE_INTERRUPT_MAX                   = 4
 } DCEInterruptSource;
 
 typedef struct InterruptSourceInfo {

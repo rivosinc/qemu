@@ -2,10 +2,11 @@
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "hw/irq.h"
 #include "hw/pci/pci.h"
+#include "hw/pci/msi.h"
 #include "hw/hw.h"
 #include "hw/misc/dce.h"
-#include "hw/pci/msi.h"
 #include <signal.h>
 
 #include "lz4.h"
@@ -16,6 +17,8 @@
 #include <openssl/conf.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+
+#include "qapi/visitor.h"
 
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
@@ -36,6 +39,8 @@ typedef struct DCEState
     uint64_t irq_mask;
     uint64_t irq_status;
 
+    uint64_t dma_mask;
+
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
 } DCEState;
@@ -47,7 +52,7 @@ static bool dce_msi_enabled(DCEState *state)
 
 static void dce_raise_interrupt(DCEState *state, DCEInterruptSource val)
 {
-    printf("Issuing interrupt!\n");
+    printf("Issuing interrupt, %d!\n", val);
     state->irq_status |= val;
     if (state->irq_status) {
         if (dce_msi_enabled(state)) {
@@ -76,7 +81,7 @@ static inline bool interrupt_on_completion(DCEState *state,
 {
     printf("ctrl is 0x%x\n", descriptor->ctrl);
     printf("MSI enabled? %d\n", dce_msi_enabled(state));
-    return ((descriptor->ctrl & 1) && dce_msi_enabled(state));
+    return (descriptor->ctrl & 1);
 }
 
 static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
@@ -772,7 +777,20 @@ static void write_irq_mask(DCEState *state, int offset, uint64_t val, unsigned s
 #define TYPE_PCI_DCE_DEVICE "dce"
 DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
-static void dce_instance_init(Object *obj) {}
+static void dce_obj_uint64(Object *obj, Visitor *v, const char *name,
+                           void *opaque, Error **errp)
+{
+    uint64_t *val = opaque;
+
+    visit_type_uint64(v, name, val, errp);
+}
+
+static void dce_instance_init(Object *obj) {
+    DCEState *state = DCE(obj);
+    state->dma_mask = (1UL << 28) - 1;
+    object_property_add(obj, "dma_mask", "uint64", dce_obj_uint64,
+                    dce_obj_uint64, NULL, &state->dma_mask);
+}
 
 static void dce_uninit(PCIDevice *dev) {}
 
@@ -839,19 +857,15 @@ static const MemoryRegionOps dce_mmio_ops = {
 static void dce_realize(PCIDevice *dev, Error **errp)
 {
 
-    DCEState *state = DCE(dev);
+    DCEState *state = DO_UPCAST(DCEState, dev, dev);
 
     dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
-    dev->cap_present |= QEMU_PCI_CAP_MSI;
 
     pci_config_set_interrupt_pin(dev->config, 1);
 
     int ret = msi_init(&state->dev, 0, 1, true, false, errp);
-    if (ret == -ENOTSUP) {
-        printf("MSIX INIT FAILED\n");
-    }
-    else {
-        printf("MSIX INIT success\n");
+    if (ret != 0) {
+        printf("MSI INIT FAILED\n");
     }
 
     // TODO: figure out the other qemu capabilities
