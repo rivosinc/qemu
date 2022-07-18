@@ -52,8 +52,8 @@ static bool dce_msi_enabled(DCEState *state)
 
 static void dce_raise_interrupt(DCEState *state, DCEInterruptSource val)
 {
-    printf("Issuing interrupt, %d!\n", val);
-    state->irq_status |= val;
+    printf("Issuing interrupt, %d!\n", (val));
+    state->irq_status |= (1 << val);
     if (state->irq_status) {
         if (dce_msi_enabled(state)) {
             msi_notify(&state->dev, 0);
