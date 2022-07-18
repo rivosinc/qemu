@@ -562,6 +562,20 @@ if not get_option('linux_aio').auto() or have_block
                            kwargs: static_kwargs)
 endif
 
+lz4 = not_found
+if not get_option('lz4').auto() or have_system
+  lz4 = cc.find_library('lz4', has_headers: ['lz4.h'],
+                          required: get_option('lz4'),
+                          kwargs: static_kwargs)
+endif
+
+openssl = not_found
+if not get_option('openssl').auto() or have_system
+  openssl = dependency('openssl', version: '>=1.1.1f',
+                    required: get_option('openssl'),
+                    method: 'pkg-config', kwargs: static_kwargs)
+endif
+
 linux_io_uring_test = '''
   #include <liburing.h>
   #include <linux/errqueue.h>
@@ -1855,6 +1869,8 @@ config_host_data.set('CONFIG_LIBISCSI', libiscsi.found())
 config_host_data.set('CONFIG_LIBNFS', libnfs.found())
 config_host_data.set('CONFIG_LIBSSH', libssh.found())
 config_host_data.set('CONFIG_LINUX_AIO', libaio.found())
+config_host_data.set('CONFIG_LZ4', lz4.found())
+config_host_data.set('CONFIG_OPENSSL', openssl.found())
 config_host_data.set('CONFIG_LINUX_IO_URING', linux_io_uring.found())
 config_host_data.set('CONFIG_LIBPMEM', libpmem.found())
 config_host_data.set('CONFIG_NUMA', numa.found())
@@ -3933,6 +3949,8 @@ summary_info += {'vde support':       vde}
 summary_info += {'netmap support':    have_netmap}
 summary_info += {'l2tpv3 support':    have_l2tpv3}
 summary_info += {'Linux AIO support': libaio}
+summary_info += {'LZ4 support': lz4}
+summary_info += {'Openssl support': openssl}
 summary_info += {'Linux io_uring support': linux_io_uring}
 summary_info += {'ATTR/XATTR support': libattr}
 summary_info += {'RDMA support':      rdma}
