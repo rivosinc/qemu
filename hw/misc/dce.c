@@ -22,6 +22,7 @@
 
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
+#define NUM_WQ            64
 
 typedef struct DCEState
 {
@@ -40,6 +41,9 @@ typedef struct DCEState
     uint64_t irq_status;
 
     uint64_t dma_mask;
+
+    WQMCC_t WQMCC;
+    uint32_t WQCR;
 
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
@@ -606,22 +610,22 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
     }
 }
 
-static void finish_unfinished_descriptors(DCEState *state)
-{
-    hwaddr current_descriptor_address = state->descriptor_ring_ctrl_head;
-    printf("Current head: 0x%lx, Current tail: 0x%lx\n",
-            state->descriptor_ring_ctrl_head, state->descriptor_ring_ctrl_tail);
-    while (current_descriptor_address != state->descriptor_ring_ctrl_tail) {
-        printf("In loop...current descriptor address: 0x%lx\n",
-                current_descriptor_address);
-        finish_descriptor(state, current_descriptor_address);
-        current_descriptor_address += sizeof(DCEDescriptor);
-        if (current_descriptor_address ==
-            state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor))
-            current_descriptor_address = state->descriptor_ring_ctrl_base;
-    }
-    state->descriptor_ring_ctrl_head = current_descriptor_address;
-}
+// static void finish_unfinished_descriptors(DCEState *state)
+// {
+//     hwaddr current_descriptor_address = state->descriptor_ring_ctrl_head;
+//     printf("Current head: 0x%lx, Current tail: 0x%lx\n",
+//             state->descriptor_ring_ctrl_head, state->descriptor_ring_ctrl_tail);
+//     while (current_descriptor_address != state->descriptor_ring_ctrl_tail) {
+//         printf("In loop...current descriptor address: 0x%lx\n",
+//                 current_descriptor_address);
+//         finish_descriptor(state, current_descriptor_address);
+//         current_descriptor_address += sizeof(DCEDescriptor);
+//         if (current_descriptor_address ==
+//             state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor))
+//             current_descriptor_address = state->descriptor_ring_ctrl_base;
+//     }
+//     state->descriptor_ring_ctrl_head = current_descriptor_address;
+// }
 
 static uint64_t read_dce_ctrl(DCEState *state, int offset, unsigned size)
 {
@@ -709,11 +713,39 @@ static void write_descriptor_ring_ctrl_tail(DCEState *state, int offset, uint64_
     state->descriptor_ring_ctrl_tail = deposit64(state->descriptor_ring_ctrl_tail, offset * 8, size * 8, val);
     // state->descriptor_ring_ctrl_tail &= ~0x7;
 
-    if (state->descriptor_ring_ctrl_tail != state->descriptor_ring_ctrl_head) {
-        finish_unfinished_descriptors(state);
+    // if (state->descriptor_ring_ctrl_tail != state->descriptor_ring_ctrl_head) {
+    //     finish_unfinished_descriptors(state);
+    // }
+}
+static void handle_wqcr_notify(DCEState *state,  uint64_t val)
+{
+    uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
+    printf("in %s, 0x%lx\n", __func__, val);
+    /* only checking notify bit */
+    /* TODO check status == READY_TO_RUN */
+    if (val & 1) {
+        dma_addr_t WQITBA = state->WQMCC.WQITBA;
+        WQITE * WQITEs = calloc(4, 0x1000);
+        pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
+        printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n", WQITEs[0].DSCBA,
+                                            WQITEs[0].DSCSZ, WQITEs[0].DSCPTA);
+        base = WQITEs[0].DSCBA;
+        pci_dma_read(&state->dev, WQITEs[0].DSCPTA, &head, 8);
+        pci_dma_read(&state->dev, WQITEs[0].DSCPTA + 8, &tail, 8);
+        printf("base is 0x%lx, head is %lu, tail is %lu\n", base, head, tail);
+        /* keep processing until we catch up */
+        while (head < tail) {
+            printf("hello?\n");
+            head_mod = head %= 64;
+            dma_addr_t descriptor_addr = base + (head_mod * sizeof(DCEDescriptor));
+            printf("processing descriptor 0x%lx\n", descriptor_addr);
+            /* Atually process the descriptor */
+            finish_descriptor(state, descriptor_addr);
+            head++;
+        }
+        pci_dma_write(&state->dev, WQITEs[0].DSCPTA, &head, 8);
     }
 }
-
 static uint64_t read_interrupt_config(DCEState *state, int offset, unsigned size, DCEInterruptSource interrupt_source)
 {
     InterruptSourceInfo info = state->interrupt_source_infos[interrupt_source];
@@ -823,6 +855,7 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
 static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
+    printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
     assert(aligned(addr, size));
 
     DCEState *state = (DCEState*) opaque;
@@ -840,6 +873,9 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned siz
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_ERROR_CONDITION);
     if (reg_addr == A_DCE_INTERRUPT_STATUS)                       write_irq_status          (state, offset, val, size);
     if (reg_addr == A_DCE_INTERRUPT_MASK)                         write_irq_mask            (state, offset, val, size);
+    /* MMIO refactor start */
+    if (reg_addr == A_DCE_WQITBA)   state->WQMCC.WQITBA = val;
+    if (reg_addr == A_DCE_WQCR)     handle_wqcr_notify(state, val);
 }
 
 static const MemoryRegionOps dce_mmio_ops = {
@@ -871,7 +907,7 @@ static void dce_realize(PCIDevice *dev, Error **errp)
     // TODO: figure out the other qemu capabilities
     // pcie_aer_init(dev, PCI_ERR_VER, )
 
-    memory_region_init_io(&state->mmio, OBJECT(state), &dce_mmio_ops, state, "dce-mmio", 1 * MiB);
+    memory_region_init_io(&state->mmio, OBJECT(state), &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
 }
 

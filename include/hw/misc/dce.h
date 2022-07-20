@@ -71,6 +71,13 @@ typedef struct DCEDescriptor {
     uint64_t operand4;
 } QEMU_PACKED DCEDescriptor;
 
+typedef struct WQMCC_t {
+    uint64_t WQITBA;
+    uint8_t WQLCCW;
+    uint8_t WQBCW;
+    // ...
+} QEMU_PACKED WQMCC_t;
+
 #define SRC_IS_LIST                 (1 << 1)
 #define SRC2_IS_LIST                (1 << 2)
 #define DEST_IS_LIST                (1 << 3)
@@ -110,8 +117,23 @@ enum {
     ENCRYPT,
     DECRYPT
 };
-// typedef struct DCEDescriptorRing {
-//     DCEDescriptor descriptors[9];
-// } QEMU_PACKED DCEDescriptorRing;
 
+typedef struct __attribute__((packed)) WQITE {
+    uint64_t DSCBA;
+    uint8_t  DSCSZ;
+    uint64_t DSCPTA;
+    uint32_t Descriptor_transctl;
+    uint64_t WQ_CTX_SAVE_BA;
+    // TBA: key slot management
+} __attribute__((packed)) WQITE;
+
+// WQMCC
+REG64(DCE_WQITBA,   88)
+REG8(DCE_WQLCCW,    8)
+// ..
+// WQCR
+REG32(DCE_WQCR,     96)
+    FIELD(DCE_WQCR, NOTIFY, 0, 1)
+    FIELD(DCE_WQCR, ABORT, 8, 1)
+    FIELD(DCE_WQCR, STATUS, 16, 1)
 #endif // DCE_H
