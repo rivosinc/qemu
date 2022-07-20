@@ -610,22 +610,6 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
     }
 }
 
-// static void finish_unfinished_descriptors(DCEState *state)
-// {
-//     hwaddr current_descriptor_address = state->descriptor_ring_ctrl_head;
-//     printf("Current head: 0x%lx, Current tail: 0x%lx\n",
-//             state->descriptor_ring_ctrl_head, state->descriptor_ring_ctrl_tail);
-//     while (current_descriptor_address != state->descriptor_ring_ctrl_tail) {
-//         printf("In loop...current descriptor address: 0x%lx\n",
-//                 current_descriptor_address);
-//         finish_descriptor(state, current_descriptor_address);
-//         current_descriptor_address += sizeof(DCEDescriptor);
-//         if (current_descriptor_address ==
-//             state->descriptor_ring_ctrl_limit + sizeof(DCEDescriptor))
-//             current_descriptor_address = state->descriptor_ring_ctrl_base;
-//     }
-//     state->descriptor_ring_ctrl_head = current_descriptor_address;
-// }
 
 static uint64_t read_dce_ctrl(DCEState *state, int offset, unsigned size)
 {
@@ -671,52 +655,6 @@ static void write_dce_ctrl(DCEState *state, int offset, uint64_t val, unsigned s
     }
 }
 
-static uint64_t read_descriptor_ring_ctrl_base(DCEState *state, int offset, unsigned size)
-{
-    return extract64(state->descriptor_ring_ctrl_base, offset * 8, size * 8);
-}
-
-static void write_descriptor_ring_ctrl_base(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    state->descriptor_ring_ctrl_base = deposit64(state->descriptor_ring_ctrl_base, offset * 8, size * 8, val);
-    // state->descriptor_ring_ctrl_base &= ~0xFFF;
-}
-
-static uint64_t read_descriptor_ring_ctrl_limit(DCEState *state, int offset, unsigned size)
-{
-    return extract64(state->descriptor_ring_ctrl_limit, offset * 8, size * 8);
-}
-
-static void write_descriptor_ring_ctrl_limit(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    state->descriptor_ring_ctrl_limit = deposit64(state->descriptor_ring_ctrl_limit, offset * 8, size * 8, val);
-    // state->descriptor_ring_ctrl_limit &= ~0xFFF;
-}
-
-static uint64_t read_descriptor_ring_ctrl_head(DCEState *state, int offset, unsigned size)
-{
-    return 0; // TODO: not allowed
-}
-
-static void write_descriptor_ring_ctrl_head(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-
-}
-
-static uint64_t read_descriptor_ring_ctrl_tail(DCEState *state, int offset, unsigned size)
-{
-    return extract64(state->descriptor_ring_ctrl_tail, offset * 8, size * 8);
-}
-
-static void write_descriptor_ring_ctrl_tail(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    state->descriptor_ring_ctrl_tail = deposit64(state->descriptor_ring_ctrl_tail, offset * 8, size * 8, val);
-    // state->descriptor_ring_ctrl_tail &= ~0x7;
-
-    // if (state->descriptor_ring_ctrl_tail != state->descriptor_ring_ctrl_head) {
-    //     finish_unfinished_descriptors(state);
-    // }
-}
 static void handle_wqcr_notify(DCEState *state,  uint64_t val)
 {
     uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
@@ -735,7 +673,6 @@ static void handle_wqcr_notify(DCEState *state,  uint64_t val)
         printf("base is 0x%lx, head is %lu, tail is %lu\n", base, head, tail);
         /* keep processing until we catch up */
         while (head < tail) {
-            printf("hello?\n");
             head_mod = head %= 64;
             dma_addr_t descriptor_addr = base + (head_mod * sizeof(DCEDescriptor));
             printf("processing descriptor 0x%lx\n", descriptor_addr);
@@ -746,6 +683,7 @@ static void handle_wqcr_notify(DCEState *state,  uint64_t val)
         pci_dma_write(&state->dev, WQITEs[0].DSCPTA, &head, 8);
     }
 }
+
 static uint64_t read_interrupt_config(DCEState *state, int offset, unsigned size, DCEInterruptSource interrupt_source)
 {
     InterruptSourceInfo info = state->interrupt_source_infos[interrupt_source];
@@ -839,10 +777,6 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     if (reg_addr == A_DCE_CTRL)                                   result = read_dce_ctrl                  (state, offset, size);
     if (reg_addr == A_DCE_STATUS)                                 result = read_dce_status                (state, offset, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_BASE)              result = read_descriptor_ring_ctrl_base (state, offset, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_LIMIT)             result = read_descriptor_ring_ctrl_limit(state, offset, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_HEAD)              result = read_descriptor_ring_ctrl_head (state, offset, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_TAIL)              result = read_descriptor_ring_ctrl_tail (state, offset, size);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_TIMEOUT);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_ERROR_CONDITION);
@@ -864,10 +798,6 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned siz
     int    offset   = addr &  3;
 
     if (reg_addr == A_DCE_CTRL)                                   write_dce_ctrl                  (state, offset, val, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_BASE)              write_descriptor_ring_ctrl_base (state, offset, val ,size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_LIMIT)             write_descriptor_ring_ctrl_limit(state, offset, val, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_HEAD)              write_descriptor_ring_ctrl_head (state, offset, val, size);
-    if (reg_addr == A_DCE_DESCRIPTOR_RING_CTRL_TAIL)              write_descriptor_ring_ctrl_tail (state, offset, val, size);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_TIMEOUT);
     if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_ERROR_CONDITION);
