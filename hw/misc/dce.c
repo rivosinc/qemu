@@ -31,11 +31,6 @@ typedef struct DCEState
 
     bool enable;
 
-    uint64_t descriptor_ring_ctrl_base;
-    uint64_t descriptor_ring_ctrl_limit;
-    uint64_t descriptor_ring_ctrl_head;
-    uint64_t descriptor_ring_ctrl_tail;
-
     InterruptSourceInfo interrupt_source_infos[DCE_INTERRUPT_MAX];
     uint64_t irq_mask;
     uint64_t irq_status;
@@ -47,6 +42,11 @@ typedef struct DCEState
 
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
+
+    QemuThread core_proc; /* Background processing thread */
+    QemuCond core_cond;   /* Background processing wakeup signal */
+    QemuMutex core_lock;  /* Global IOMMU lock, used for cache/regs updates */
+    unsigned core_exec;   /* Processing thread execution actions */
 } DCEState;
 
 static bool dce_msi_enabled(DCEState *state)
@@ -278,9 +278,10 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     free(dest_local);
 }
 
-static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_len,
-                       const uint8_t * cipher_key, const uint8_t * iv,
-                       uint8_t * cipher_text)
+static int encrypt_aes_xts_256(const uint8_t * plain_text,
+                               uint32_t plain_text_len,
+                               const uint8_t * cipher_key, const uint8_t * iv,
+                               uint8_t * cipher_text)
 {
     if ((plain_text == NULL) ||
         (cipher_text == NULL) ||
@@ -294,7 +295,8 @@ static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_l
         return -2;
     }
 
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_xts(), NULL, cipher_key, NULL) != 1) {
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_xts(), NULL,
+            cipher_key, NULL) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         return -3;
     }
@@ -313,7 +315,8 @@ static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_l
 
     if (encrypted_length != plain_text_len) {
         int final_length = 0;
-        if (EVP_EncryptFinal_ex(ctx, cipher_text + encrypted_length, &final_length) != 1) {
+        if (EVP_EncryptFinal_ex(ctx, cipher_text + encrypted_length,
+                &final_length) != 1) {
             EVP_CIPHER_CTX_free(ctx);
             return -6;
         }
@@ -327,9 +330,9 @@ static int encrypt_aes_xts_256(const uint8_t * plain_text, uint32_t plain_text_l
     return encrypted_length;
 }
 
-static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text_len,
-                        const uint8_t * cipher_key, const uint8_t * iv,
-                        uint8_t * plain_text)
+static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t
+                               cipher_text_len, const uint8_t * cipher_key,
+                               const uint8_t * iv, uint8_t * plain_text)
 {
     if ((plain_text == NULL) ||
         (cipher_text == NULL) ||
@@ -343,7 +346,8 @@ static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text
     if (ctx == NULL) {
         return -2;
     }
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_xts(), NULL, cipher_key, NULL) != 1) {
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_xts(), NULL,
+            cipher_key, NULL) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         return -3;
     }
@@ -354,14 +358,16 @@ static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t cipher_text
 
     int decrypted_length = 0;
 
-    if (EVP_DecryptUpdate(ctx, plain_text, &decrypted_length, cipher_text, cipher_text_len) != 1) {
+    if (EVP_DecryptUpdate(ctx, plain_text, &decrypted_length, cipher_text,
+            cipher_text_len) != 1) {
         EVP_CIPHER_CTX_free(ctx);
         return -5;
     }
 
     if (decrypted_length != cipher_text_len) {
         int final_length = 0;
-        if (EVP_EncryptFinal_ex(ctx, plain_text + decrypted_length, &final_length) != 1) {
+        if (EVP_EncryptFinal_ex(ctx, plain_text + decrypted_length,
+                &final_length) != 1) {
             EVP_CIPHER_CTX_free(ctx);
             return -6;
         }
@@ -557,12 +563,16 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
         default:
             break;
     }
-    err |= (post_process_size == 0);
-    if (err) goto cleanup;
-    /* copy back the results */
-    local_buffer_tranfer(state, (uint8_t *)dest_local, dest, dest_size,
-                         dest_is_list, FROM_LOCAL);
 
+    err |= (post_process_size == 0 || post_process_size > dest_size);
+    if (err) goto error;
+    /* copy back the results */
+    local_buffer_tranfer(state, (uint8_t *)dest_local, dest, post_process_size,
+                         dest_is_list, FROM_LOCAL);
+    goto cleanup;
+
+error:
+    printf("ERROR: error has occured, cleaning up!");
 cleanup:
     complete_workload(state, descriptor, err, 0, post_process_size);
     free(src_local);
@@ -645,10 +655,6 @@ static void write_dce_ctrl(DCEState *state, int offset, uint64_t val, unsigned s
             case 0:
                 state->enable = extract64(val, i * 8, 1);
 
-                if (state->enable) {
-                    state->descriptor_ring_ctrl_tail = state->descriptor_ring_ctrl_base;
-                    state->descriptor_ring_ctrl_head = state->descriptor_ring_ctrl_base;
-                }
                 if (extract64(val, 1, 1)) reset(state);
                 break;
         }
@@ -657,31 +663,14 @@ static void write_dce_ctrl(DCEState *state, int offset, uint64_t val, unsigned s
 
 static void handle_wqcr_notify(DCEState *state,  uint64_t val)
 {
-    uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
     printf("in %s, 0x%lx\n", __func__, val);
     /* only checking notify bit */
     /* TODO check status == READY_TO_RUN */
     if (val & 1) {
-        dma_addr_t WQITBA = state->WQMCC.WQITBA;
-        WQITE * WQITEs = calloc(4, 0x1000);
-        pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
-        printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n", WQITEs[0].DSCBA,
-                                            WQITEs[0].DSCSZ, WQITEs[0].DSCPTA);
-        base = WQITEs[0].DSCBA;
-        pci_dma_read(&state->dev, WQITEs[0].DSCPTA, &head, 8);
-        pci_dma_read(&state->dev, WQITEs[0].DSCPTA + 8, &tail, 8);
-        printf("base is 0x%lx, head is %lu, tail is %lu\n", base, head, tail);
-        /* keep processing until we catch up */
-        while (head < tail) {
-            head_mod = head %= 64;
-            dma_addr_t descriptor_addr = base + (head_mod * sizeof(DCEDescriptor));
-            printf("processing descriptor 0x%lx\n", descriptor_addr);
-            /* Atually process the descriptor */
-            finish_descriptor(state, descriptor_addr);
-            head++;
-        }
-        pci_dma_write(&state->dev, WQITEs[0].DSCPTA, &head, 8);
+        // mark WQCR status as READY_TO_RUN
+        state->WQCR = FIELD_DP32(state->WQCR, DCE_WQCR, STATUS, READY_TO_RUN);
     }
+    qemu_cond_signal(&state->core_cond);
 }
 
 static uint64_t read_interrupt_config(DCEState *state, int offset, unsigned size, DCEInterruptSource interrupt_source)
@@ -819,6 +808,39 @@ static const MemoryRegionOps dce_mmio_ops = {
     },
 };
 
+static void *dce_core_proc(void* arg)
+{
+    DCEState * state = arg;
+    uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
+
+    while(1) {
+        dma_addr_t WQITBA = state->WQMCC.WQITBA;
+        WQITE * WQITEs = calloc(4, 0x1000);
+        pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
+        printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n", WQITEs[0].DSCBA,
+                                            WQITEs[0].DSCSZ, WQITEs[0].DSCPTA);
+        base = WQITEs[0].DSCBA;
+        pci_dma_read(&state->dev, WQITEs[0].DSCPTA, &head, 8);
+        pci_dma_read(&state->dev, WQITEs[0].DSCPTA + 8, &tail, 8);
+        printf("base is 0x%lx, head is %lu, tail is %lu\n", base, head, tail);
+        /* keep processing until we catch up */
+        while (head < tail) {
+            head_mod = head %= 64;
+            dma_addr_t descriptor_addr = base + (head_mod * sizeof(DCEDescriptor));
+            printf("processing descriptor 0x%lx\n", descriptor_addr);
+            /* Atually process the descriptor */
+            finish_descriptor(state, descriptor_addr);
+            head++;
+        }
+        pci_dma_write(&state->dev, WQITEs[0].DSCPTA, &head, 8);
+
+        qemu_mutex_lock(&state->core_lock);
+        qemu_cond_wait(&state->core_cond, &state->core_lock);
+        qemu_mutex_unlock(&state->core_lock);
+    }
+    return NULL;
+}
+
 #include "qemu/units.h"
 static void dce_realize(PCIDevice *dev, Error **errp)
 {
@@ -834,11 +856,15 @@ static void dce_realize(PCIDevice *dev, Error **errp)
         printf("MSI INIT FAILED\n");
     }
 
-    // TODO: figure out the other qemu capabilities
-    // pcie_aer_init(dev, PCI_ERR_VER, )
-
-    memory_region_init_io(&state->mmio, OBJECT(state), &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
+    memory_region_init_io(&state->mmio, OBJECT(state),
+        &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
+
+    /* start the core thread */
+    qemu_cond_init(&state->core_cond);
+    qemu_mutex_init(&state->core_lock);
+    qemu_thread_create(&state->core_proc, "dce-core",
+        dce_core_proc, state, QEMU_THREAD_JOINABLE);
 }
 
 // static uint32_t dce_config_read(PCIDevice *pci_dev, uint32_t addr, int size)

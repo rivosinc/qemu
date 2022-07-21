@@ -113,6 +113,11 @@ enum {
     DECRYPT
 };
 
+enum {
+    IDLE,
+    READY_TO_RUN
+};
+
 typedef struct __attribute__((packed)) WQITE {
     uint64_t DSCBA;
     uint8_t  DSCSZ;
