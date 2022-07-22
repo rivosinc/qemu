@@ -26,6 +26,8 @@
 
 typedef struct DCEState
 {
+    // uint8_t regs_rw[RIO_REG_SIZE];  /* MMIO register state */
+
     PCIDevice dev;
     MemoryRegion mmio;
 
@@ -38,7 +40,7 @@ typedef struct DCEState
     uint64_t dma_mask;
 
     WQMCC_t WQMCC;
-    uint32_t WQCR;
+    uint32_t WQCR[NUM_WQ];
 
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
@@ -665,10 +667,14 @@ static void handle_wqcr_notify(DCEState *state,  uint64_t val)
 {
     printf("in %s, 0x%lx\n", __func__, val);
     /* only checking notify bit */
-    /* TODO check status == READY_TO_RUN */
+    int WQ_num = 0;
     if (val & 1) {
         // mark WQCR status as READY_TO_RUN
-        state->WQCR = FIELD_DP32(state->WQCR, DCE_WQCR, STATUS, READY_TO_RUN);
+        state->WQCR[WQ_num] = FIELD_DP32(state->WQCR[WQ_num], DCE_WQCR,
+            STATUS, READY_TO_RUN);
+
+        /* FIXME: this shouldnt be here */
+        state->WQMCC.WQENABLE |= (1 << WQ_num);
     }
     qemu_cond_signal(&state->core_cond);
 }
@@ -817,23 +823,38 @@ static void *dce_core_proc(void* arg)
         dma_addr_t WQITBA = state->WQMCC.WQITBA;
         WQITE * WQITEs = calloc(4, 0x1000);
         pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
-        printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n", WQITEs[0].DSCBA,
-                                            WQITEs[0].DSCSZ, WQITEs[0].DSCPTA);
-        base = WQITEs[0].DSCBA;
-        pci_dma_read(&state->dev, WQITEs[0].DSCPTA, &head, 8);
-        pci_dma_read(&state->dev, WQITEs[0].DSCPTA + 8, &tail, 8);
-        printf("base is 0x%lx, head is %lu, tail is %lu\n", base, head, tail);
-        /* keep processing until we catch up */
-        while (head < tail) {
-            head_mod = head %= 64;
-            dma_addr_t descriptor_addr = base + (head_mod * sizeof(DCEDescriptor));
-            printf("processing descriptor 0x%lx\n", descriptor_addr);
-            /* Atually process the descriptor */
-            finish_descriptor(state, descriptor_addr);
-            head++;
+        /* Iterate thru all WQs and see if there is any work to do */
+        for (int i = 0; i < NUM_WQ; i ++) {
+            /* skip the WQ if it is not enabled */
+            if (!(extract64(state->WQMCC.WQENABLE, i, 1))) continue;
+            if (FIELD_EX32(state->WQCR[i], DCE_WQCR, STATUS) == READY_TO_RUN) {
+                printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
+                    WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
+                base = WQITEs[i].DSCBA;
+                /* get the head and tail pointer information */
+                pci_dma_read(&state->dev, WQITEs[i].DSCPTA, &head, 8);
+                pci_dma_read(&state->dev, WQITEs[i].DSCPTA + 8, &tail, 8);
+                printf("base is 0x%lx, head is %lu, tail is %lu\n",
+                    base, head, tail);
+                /* keep processing until we catch up */
+                while (head < tail) {
+                    head_mod = head %= 64;
+                    dma_addr_t descriptor_addr = base +
+                        (head_mod * sizeof(DCEDescriptor));
+                    printf("processing descriptor 0x%lx\n", descriptor_addr);
+                    /* Atually process the descriptor */
+                    finish_descriptor(state, descriptor_addr);
+                    head++;
+                }
+                pci_dma_write(&state->dev, WQITEs[i].DSCPTA, &head, 8);
+            }
+            /* set the WQ back to idle if we finished the job */
+            if (head == tail)
+                state->WQCR[i] = FIELD_DP32(state->WQCR[i], DCE_WQCR,
+                    STATUS, IDLE);
         }
-        pci_dma_write(&state->dev, WQITEs[0].DSCPTA, &head, 8);
 
+        free(WQITEs);
         qemu_mutex_lock(&state->core_lock);
         qemu_cond_wait(&state->core_cond, &state->core_lock);
         qemu_mutex_unlock(&state->core_lock);
