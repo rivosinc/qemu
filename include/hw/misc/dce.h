@@ -1,6 +1,8 @@
 #ifndef DCE_H
 
 #include "hw/registerfields.h"
+#include "qemu/osdep.h"
+#include "qom/object.h"
 
 REG32(DCE_CTRL, 0)
     FIELD(DCE_CTRL, ENABLE, 0, 1)
@@ -123,6 +125,14 @@ enum {
     READY_TO_RUN
 };
 
+enum {
+    DCE_EXEC_WQMCC,
+    DCE_EXEC_NOTIFY,
+    DCE_EXEC_READY_TO_RUN,
+    DCE_EXEC_GLOBAL_CONFIG,
+    DCE_EXEC_LAST
+};
+
 typedef struct __attribute__((packed)) WQITE {
     uint64_t DSCBA;
     uint8_t  DSCSZ;
@@ -141,4 +151,23 @@ REG32(DCE_WQCR,     96)
     FIELD(DCE_WQCR, NOTIFY, 0, 1)
     FIELD(DCE_WQCR, ABORT, 8, 1)
     FIELD(DCE_WQCR, STATUS, 16, 1)
+
+/* Aligned ? */
+#define DCE_REG_WQITBA      0x0
+#define DCE_REG_WQRUNSTS    0x10
+#define DCE_REG_WQENABLE    0x18
+#define DCE_REG_WQIRQSTS    0x20
+#define DCE_REG_WQCR        0x0
+
+#define TYPE_RISCV_DCE_MEMORY_REGION "x-riscv-dce-mr"
+typedef struct RISCVDCESpace RISCVDCESpace;
+
+#define TYPE_RISCV_DCE_PCI "x-riscv-dce-pci"
+OBJECT_DECLARE_SIMPLE_TYPE(RISCVDCEStatePci, RISCV_DCE_PCI)
+typedef struct RISCVDCEStatePci RISCVDCEStatePci;
+
+#define TYPE_RISCV_DCE_SYS "x-riscv-dce-device"
+OBJECT_DECLARE_SIMPLE_TYPE(RISCVDCEStateSys, RISCV_DCE_SYS)
+typedef struct RISCVDCEStateSys RISCVDCEStateSys;
+
 #endif // DCE_H

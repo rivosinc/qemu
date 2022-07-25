@@ -7,7 +7,10 @@
 #include "hw/pci/msi.h"
 #include "hw/hw.h"
 #include "hw/misc/dce.h"
+#include "qemu/atomic.h"
 #include <signal.h>
+// #include "hw/riscv/riscv_hart.h" FIXME
+#define DCE_PAGE_SIZE  (1 << 12)
 
 #include "lz4.h"
 #include "snappy-c.h"
@@ -26,21 +29,17 @@
 
 typedef struct DCEState
 {
-    // uint8_t regs_rw[RIO_REG_SIZE];  /* MMIO register state */
-
     PCIDevice dev;
     MemoryRegion mmio;
 
+    uint8_t regs_rw[128][DCE_PAGE_SIZE];  /* 512 Kib MMIO register state */
+    uint8_t regs_ro[128][DCE_PAGE_SIZE];  /* 512 Kib MMIO register state */
+
     bool enable;
-
-    InterruptSourceInfo interrupt_source_infos[DCE_INTERRUPT_MAX];
-    uint64_t irq_mask;
-    uint64_t irq_status;
-
     uint64_t dma_mask;
 
-    WQMCC_t WQMCC;
-    uint32_t WQCR[NUM_WQ];
+    // WQMCC_t WQMCC;
+    // uint32_t WQCR[NUM_WQ];
 
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
@@ -56,11 +55,14 @@ static bool dce_msi_enabled(DCEState *state)
     return msi_enabled(&state->dev);
 }
 
-static void dce_raise_interrupt(DCEState *state, DCEInterruptSource val)
+static void dce_raise_interrupt(DCEState *state, int WQ_id,
+                DCEInterruptSource val)
 {
-    printf("Issuing interrupt, %d!\n", (val));
-    state->irq_status |= (1 << val);
-    if (state->irq_status) {
+    /* TODO: support other interrupts */
+    printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
+    uint64_t irq_status = ldq_le_p(&state->regs_rw[0][DCE_REG_WQIRQSTS]);
+    irq_status |= BIT(val);
+    if (irq_status) {
         if (dce_msi_enabled(state)) {
             msi_notify(&state->dev, 0);
         }
@@ -72,10 +74,10 @@ static void dce_raise_interrupt(DCEState *state, DCEInterruptSource val)
 //     state->irq_status &= ~val;
 // }
 
-static void reset(DCEState *state)
-{
-    // TODO: fill this out later when it's clear what happens here
-}
+// static void reset(DCEState *state)
+// {
+//     // TODO: fill this out later when it's clear what happens here
+// }
 
 static bool aligned(hwaddr addr, unsigned size)
 {
@@ -112,9 +114,6 @@ static void complete_workload(DCEState *state, struct DCEDescriptor *descriptor,
     }
     completion = populate_completion(status, spec, data);
     pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
-
-    if (interrupt_on_completion(state, descriptor))
-        dce_raise_interrupt(state, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
 }
 
 /* Data processing functions */
@@ -598,7 +597,8 @@ static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
     complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN);
 }
 
-static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
+static void finish_descriptor(DCEState *state, int WQ_id,
+                hwaddr descriptor_address)
 {
     struct DCEDescriptor descriptor;
     MemTxResult ret = pci_dma_read(&state->dev,
@@ -620,123 +620,8 @@ static void finish_descriptor(DCEState *state, hwaddr descriptor_address)
         case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
         case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
     }
-}
-
-
-static uint64_t read_dce_ctrl(DCEState *state, int offset, unsigned size)
-{
-    uint64_t result = 0;
-
-    for (int i = 0; i < size; i++) {
-        switch (offset + i) {
-            case 0: result = deposit64(result, i * 8, 1, state->enable);
-        }
-    }
-
-    return result;
-}
-
-static uint64_t read_dce_status(DCEState *state, int offset, unsigned size)
-{
-    uint64_t result = 0;
-
-    for (int i = 0; i < size; i++) {
-        switch (offset + i) {
-            case 0: result = deposit64(result, i * 8, 1, state->enable);
-        }
-    }
-
-    return result;
-}
-
-
-static void write_dce_ctrl(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    for (int i = 0; i < size; i++) {
-        switch (offset + i) {
-            case 0:
-                state->enable = extract64(val, i * 8, 1);
-
-                if (extract64(val, 1, 1)) reset(state);
-                break;
-        }
-    }
-}
-
-static void handle_wqcr_notify(DCEState *state,  uint64_t val)
-{
-    printf("in %s, 0x%lx\n", __func__, val);
-    /* only checking notify bit */
-    int WQ_num = 0;
-    if (val & 1) {
-        // mark WQCR status as READY_TO_RUN
-        state->WQCR[WQ_num] = FIELD_DP32(state->WQCR[WQ_num], DCE_WQCR,
-            STATUS, READY_TO_RUN);
-
-        /* FIXME: this shouldnt be here */
-        state->WQMCC.WQENABLE |= (1 << WQ_num);
-    }
-    qemu_cond_signal(&state->core_cond);
-}
-
-static uint64_t read_interrupt_config(DCEState *state, int offset, unsigned size, DCEInterruptSource interrupt_source)
-{
-    InterruptSourceInfo info = state->interrupt_source_infos[interrupt_source];
-
-    uint64_t result = 0;
-
-    for (int i = 0; i < size; i++) {
-        switch (offset + i) {
-            case 0: result = deposit64(result, i * 8, 8, extract64(info.vector_index,  0, 8)); break;
-            case 1: result = deposit64(result, i * 8, 8, extract64(info.vector_index,  8, 8)); break;
-            case 2: result = deposit64(result, i * 8, 8, extract64(info.vector_index, 16, 8)); break;
-            case 3: result = deposit64(result, i * 8, 8, extract64(info.vector_index, 24, 8)); break;
-
-            case 7: result = deposit64(result, i * 8, 8, info.enable << 7); break;
-        }
-    }
-
-    return result;
-}
-
-static uint64_t write_interrupt_config(DCEState *state, int offset, uint64_t val, unsigned size, DCEInterruptSource interrupt_source)
-{
-    InterruptSourceInfo info = state->interrupt_source_infos[interrupt_source];
-
-    uint64_t result = 0;
-
-    for (int i = 0; i < size; i++) {
-        switch (offset + i) {
-            case 0: info.vector_index = deposit64(info.vector_index,  0, 8, extract64(val, i * 8, 8)); break;
-            case 1: info.vector_index = deposit64(info.vector_index,  8, 8, extract64(val, i * 8, 8)); break;
-            case 2: info.vector_index = deposit64(info.vector_index, 16, 8, extract64(val, i * 8, 8)); break;
-            case 3: info.vector_index = deposit64(info.vector_index, 24, 8, extract64(val, i * 8, 8)); break;
-
-            case 7: info.enable = extract64(val, i * 8 + 7, 1); break;
-        }
-    }
-
-    return result;
-}
-
-static uint64_t read_irq_status(DCEState *state, int offset, unsigned size)
-{
-    return extract64(state->irq_status, offset * 8, size * 8);
-}
-
-static void write_irq_status(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    state->irq_status = deposit64(state->irq_status, offset * 8, size * 8, state->irq_status & ~val);
-}
-
-static uint64_t read_irq_mask(DCEState *state, int offset, unsigned size)
-{
-    return extract64(state->irq_mask, offset * 8, size * 8);
-}
-
-static void write_irq_mask(DCEState *state, int offset, uint64_t val, unsigned size)
-{
-    state->irq_mask = deposit64(state->irq_mask, offset * 8, size * 8, val);
+    if (interrupt_on_completion(state, &descriptor))
+        dce_raise_interrupt(state, WQ_id, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
 }
 
 #define TYPE_PCI_DCE_DEVICE "dce"
@@ -762,45 +647,78 @@ static void dce_uninit(PCIDevice *dev) {}
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     assert(aligned(addr, size));
-
-    DCEState *state = (DCEState*) opaque;
+    // DCEState *state = (DCEState*) opaque;
 
     uint64_t result = 0;
-
-    hwaddr reg_addr = addr & ~3;
-    int    offset   = addr &  3;
-
-    if (reg_addr == A_DCE_CTRL)                                   result = read_dce_ctrl                  (state, offset, size);
-    if (reg_addr == A_DCE_STATUS)                                 result = read_dce_status                (state, offset, size);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_TIMEOUT);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       result = read_interrupt_config          (state, offset, size, DCE_INTERRUPT_ERROR_CONDITION);
-    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       result = read_irq_status          (state, offset, size);
-    if (reg_addr == A_DCE_INTERRUPT_MASK)                         result = read_irq_mask            (state, offset, size);
-
-
+    /* FIXME: insert content */
     return result;
 }
 
-static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
+static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
+                    unsigned size)
 {
     printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
-    assert(aligned(addr, size));
 
-    DCEState *state = (DCEState*) opaque;
+    DCEState *s = (DCEState*) opaque;
+    uint32_t page = addr / DCE_PAGE_SIZE;
+    addr = addr % DCE_PAGE_SIZE;
+    uint32_t regb = (addr + size - 1) & ~3;
+    uint32_t exec = 0;
+    // uint32_t busy = 0;
 
-    hwaddr reg_addr = addr & ~3;
-    int    offset   = addr &  3;
+    printf("regb 0x%x, addr 0x%lx, page %d\n", regb, addr, page);
+    if (size == 0 || size > 8 || (addr & (size - 1)) != 0) {
+        /* Unsupported MMIO alignment or access size */
+        return;
+    }
 
-    if (reg_addr == A_DCE_CTRL)                                   write_dce_ctrl                  (state, offset, val, size);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_DESCRIPTOR_COMPLETION) write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_TIMEOUT)               write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_TIMEOUT);
-    if (reg_addr == A_DCE_INTERRUPT_CONFIG_ERROR_CONDITION)       write_interrupt_config          (state, offset, val, size, DCE_INTERRUPT_ERROR_CONDITION);
-    if (reg_addr == A_DCE_INTERRUPT_STATUS)                       write_irq_status          (state, offset, val, size);
-    if (reg_addr == A_DCE_INTERRUPT_MASK)                         write_irq_mask            (state, offset, val, size);
-    /* MMIO refactor start */
-    if (reg_addr == A_DCE_WQITBA)   state->WQMCC.WQITBA = val;
-    if (reg_addr == A_DCE_WQCR)     handle_wqcr_notify(state, val);
+    if (addr + size > sizeof(s->regs_rw)) {
+        /* Unsupported MMIO access location. */
+        return;
+    }
+
+    if (page == 0) {
+        /* WQMCC page */
+    }
+    else if (1 <= page && page <= 64) {
+        /* WQCR pages */
+        if (addr == DCE_REG_WQCR) {
+            exec |= BIT(DCE_EXEC_NOTIFY);
+        }
+    }
+    else if (page == 127) {
+        /* Global config page */
+    }
+
+    qemu_mutex_lock(&s->core_lock);
+    if (size == 1) {
+        uint8_t ro = s->regs_ro[page][addr];
+        uint8_t wc = 0;
+        uint8_t rw = s->regs_rw[page][addr];
+        s->regs_rw[page][addr] = ((rw & ro) | (val & ~ro)) & ~(val & wc);
+    } else if (size == 2) {
+        uint16_t ro = lduw_le_p(&s->regs_ro[page][addr]);
+        uint16_t wc = 0;
+        uint16_t rw = lduw_le_p(&s->regs_rw[page][addr]);
+        stw_le_p(&s->regs_rw[page][addr], ((rw & ro) | (val & ~ro)) & ~(val & wc));
+    } else if (size == 4) {
+        uint32_t ro = ldl_le_p(&s->regs_ro[page][addr]);
+        uint32_t wc = 0;
+        uint32_t rw = ldl_le_p(&s->regs_rw[page][addr]);
+        stl_le_p(&s->regs_rw[page][addr], ((rw & ro) | (val & ~ro)) & ~(val & wc));
+    } else if (size == 8) {
+        uint64_t ro = ldq_le_p(&s->regs_ro[page][addr]);
+        uint64_t wc = 0;
+        uint64_t rw = ldq_le_p(&s->regs_rw[page][addr]);
+        stq_le_p(&s->regs_rw[page][addr], ((rw & ro) | (val & ~ro)) & ~(val & wc));
+    }
+    qemu_mutex_unlock(&s->core_lock);
+    printf("Exec %d\n", exec);
+    if (exec) {
+        qatomic_or(&s->core_exec, exec);
+        printf("Signaling conditioon\n");
+        qemu_cond_signal(&s->core_cond);
+    }
 }
 
 static const MemoryRegionOps dce_mmio_ops = {
@@ -814,50 +732,111 @@ static const MemoryRegionOps dce_mmio_ops = {
     },
 };
 
+static void set_ready_to_run_all_places(DCEState * state, int WQ_id, int val)
+{
+    /* should already hold lock */
+    uint32_t WQCR = ldl_le_p(&state->regs_rw[WQ_id+1][DCE_REG_WQCR]);
+    WQCR = FIELD_DP32(WQCR, DCE_WQCR, STATUS, val);
+    stq_le_p(&state->regs_rw[WQ_id+1][DCE_REG_WQCR], WQCR);
+
+    uint64_t WQRUNSTS = ldl_le_p(&state->regs_rw[0][DCE_REG_WQRUNSTS]);
+    WQRUNSTS = deposit64(WQRUNSTS, WQ_id, 1, val);
+    stq_le_p(&state->regs_rw[0][DCE_REG_WQRUNSTS], WQRUNSTS);
+    /* TODO: Global config */
+}
+
+static void process_wqs (DCEState * state) {
+
+    uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
+    dma_addr_t WQITBA = ldq_le_p(&state->regs_rw[0][DCE_REG_WQITBA]);
+    uint64_t WQENABLE = ldq_le_p(&state->regs_rw[0][DCE_REG_WQENABLE]);
+    printf("WQITBA: 0x%lx\n", WQITBA);
+    WQITE * WQITEs = calloc(4, 0x1000);
+    pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
+
+    /* Iterate thru all WQs and see if there is any work to do */
+    for (int i = 0; i < NUM_WQ; i ++) {
+        /* skip the WQ if it is not enabled */
+        if (!(WQENABLE & BIT(i))) continue;
+
+        /* WQCR begins at page 1 */
+        uint32_t WQCR = ldl_le_p(&state->regs_rw[i+1][DCE_REG_WQCR]);
+
+        if (FIELD_EX32(WQCR, DCE_WQCR, STATUS) == READY_TO_RUN) {
+            printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
+                WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
+            base = WQITEs[i].DSCBA;
+            /* get the head and tail pointer information */
+            pci_dma_read(&state->dev, WQITEs[i].DSCPTA, &head, 8);
+            pci_dma_read(&state->dev, WQITEs[i].DSCPTA + 8, &tail, 8);
+            printf("base is 0x%lx, head is %lu, tail is %lu\n",
+                base, head, tail);
+            /* keep processing until we catch up */
+            while (head < tail) {
+                head_mod = head %= 64;
+                dma_addr_t descriptor_addr = base +
+                    (head_mod * sizeof(DCEDescriptor));
+                printf("processing descriptor 0x%lx\n", descriptor_addr);
+                /* Atually process the descriptor */
+                finish_descriptor(state, i, descriptor_addr);
+                head++;
+            }
+            pci_dma_write(&state->dev, WQITEs[i].DSCPTA, &head, 8);
+        }
+        /* set the WQ back to idle if we finished the job */
+        if (head == tail) {
+            qemu_mutex_lock(&state->core_lock);
+            set_ready_to_run_all_places(state, i, IDLE);
+            qemu_mutex_unlock(&state->core_lock);
+        }
+    }
+    free(WQITEs);
+}
+
+static void process_notify (DCEState * state, unsigned * exec) {
+    for (int i = 0; i < NUM_WQ; i ++) {
+        qemu_mutex_lock(&state->core_lock);
+        uint32_t WQCR = ldl_le_p(&state->regs_rw[i+1][DCE_REG_WQCR]);
+        if (FIELD_EX32(WQCR, DCE_WQCR, NOTIFY) == 1) {
+            /* clear notify, and set status to ready to run */
+            WQCR = FIELD_DP32(WQCR, DCE_WQCR, NOTIFY, 0);
+            /* FXIME: does WQENABLE affect this ? */
+            set_ready_to_run_all_places(state, i, READY_TO_RUN);
+            *exec |= BIT(DCE_EXEC_READY_TO_RUN);
+        }
+        if (FIELD_EX32(WQCR, DCE_WQCR, ABORT) == 1) {
+            /* TODO */
+        }
+        qemu_mutex_unlock(&state->core_lock);
+    }
+}
+
 static void *dce_core_proc(void* arg)
 {
     DCEState * state = arg;
-    uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
+
+    unsigned exec = 0;
+    unsigned mask = 0;
 
     while(1) {
-        dma_addr_t WQITBA = state->WQMCC.WQITBA;
-        WQITE * WQITEs = calloc(4, 0x1000);
-        pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
-        /* Iterate thru all WQs and see if there is any work to do */
-        for (int i = 0; i < NUM_WQ; i ++) {
-            /* skip the WQ if it is not enabled */
-            if (!(extract64(state->WQMCC.WQENABLE, i, 1))) continue;
-            if (FIELD_EX32(state->WQCR[i], DCE_WQCR, STATUS) == READY_TO_RUN) {
-                printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
-                    WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
-                base = WQITEs[i].DSCBA;
-                /* get the head and tail pointer information */
-                pci_dma_read(&state->dev, WQITEs[i].DSCPTA, &head, 8);
-                pci_dma_read(&state->dev, WQITEs[i].DSCPTA + 8, &tail, 8);
-                printf("base is 0x%lx, head is %lu, tail is %lu\n",
-                    base, head, tail);
-                /* keep processing until we catch up */
-                while (head < tail) {
-                    head_mod = head %= 64;
-                    dma_addr_t descriptor_addr = base +
-                        (head_mod * sizeof(DCEDescriptor));
-                    printf("processing descriptor 0x%lx\n", descriptor_addr);
-                    /* Atually process the descriptor */
-                    finish_descriptor(state, descriptor_addr);
-                    head++;
-                }
-                pci_dma_write(&state->dev, WQITEs[i].DSCPTA, &head, 8);
-            }
-            /* set the WQ back to idle if we finished the job */
-            if (head == tail)
-                state->WQCR[i] = FIELD_DP32(state->WQCR[i], DCE_WQCR,
-                    STATUS, IDLE);
+        // printf("exec is 0x%x\n", exec);
+        mask = (mask ? mask : BIT(DCE_EXEC_LAST)) >> 1;
+        switch (exec & mask) {
+            case BIT(DCE_EXEC_NOTIFY):
+                process_notify(state, &exec);
+                break;
+            case BIT(DCE_EXEC_READY_TO_RUN):
+                process_wqs(state);
+                break;
         }
-
-        free(WQITEs);
-        qemu_mutex_lock(&state->core_lock);
-        qemu_cond_wait(&state->core_cond, &state->core_lock);
-        qemu_mutex_unlock(&state->core_lock);
+        exec &= ~mask;
+        exec |= qatomic_xchg(&state->core_exec, 0);
+        if (!exec) {
+            qemu_mutex_lock(&state->core_lock);
+            qemu_cond_wait(&state->core_cond, &state->core_lock);
+            qemu_mutex_unlock(&state->core_lock);
+        }
+        // printf("woken up!\n");
     }
     return NULL;
 }
@@ -865,7 +844,6 @@ static void *dce_core_proc(void* arg)
 #include "qemu/units.h"
 static void dce_realize(PCIDevice *dev, Error **errp)
 {
-
     DCEState *state = DO_UPCAST(DCEState, dev, dev);
 
     dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
@@ -873,30 +851,30 @@ static void dce_realize(PCIDevice *dev, Error **errp)
     pci_config_set_interrupt_pin(dev->config, 1);
 
     int ret = msi_init(&state->dev, 0, 1, true, false, errp);
+
     if (ret != 0) {
         printf("MSI INIT FAILED\n");
     }
-
     memory_region_init_io(&state->mmio, OBJECT(state),
         &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
 
+    /* Mark all registers read-only */
+    memset(state->regs_ro, 0xff, sizeof(state->regs_ro));
+    memset(state->regs_rw, 0x00, sizeof(state->regs_rw));
+    /* mark the WQMCC page as RW */
+    memset(state->regs_ro, 0x00, DCE_PAGE_SIZE);
+
+    /* WQCR pages, mark NOTIFY / ABORT as RW */
+    for (int i = 1; i <= 64; i++) {
+        stw_le_p(&state->regs_ro[i][DCE_REG_WQCR], 0);
+    }
     /* start the core thread */
     qemu_cond_init(&state->core_cond);
     qemu_mutex_init(&state->core_lock);
     qemu_thread_create(&state->core_proc, "dce-core",
         dce_core_proc, state, QEMU_THREAD_JOINABLE);
 }
-
-// static uint32_t dce_config_read(PCIDevice *pci_dev, uint32_t addr, int size)
-// {
-//     return 0;
-// }
-
-// static void dce_config_write(PCIDevice *pci_dev, uint32_t addr, uint32_t val, int size)
-// {
-//     return;
-// }
 
 static void dce_class_init(ObjectClass *class, void *data)
 {
