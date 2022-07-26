@@ -478,7 +478,7 @@ static bool access_victim_cache(Cache *cache, uint64_t addr, bool is_victim)
     if (!is_victim)
     {
        hit_blk = in_cache(cache,addr);
-       if(hit_blk!=1)
+       if(hit_blk != -1)
        {
           //mark it invalid on a hit
           cache->sets[set].blocks[hit_blk].valid = false;
