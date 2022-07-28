@@ -50,7 +50,10 @@
 #define RIO_REG_IOHPMCYCLES     0x0060
 #define RIO_REG_IOHPMCTR_BASE   0x0068
 #define RIO_REG_IOHPMEVT_BASE   0x0160
-#define RIO_REG_IOCNTSEC        0x0258
+#define RIO_REG_TR_REQ_IOVA     0x0258
+#define RIO_REG_TR_REQ_CTRL     0x0260
+#define RIO_REG_TR_RESPONSE     0x0268
+
 #define RIO_REG_IVEC            0x02F8  /* Interrupt cause to vector mapping */
 
 #define RIO_REG_SIZE            0x0300  /* Spec. defined registers space */
@@ -72,8 +75,8 @@
 #define RIO_CAP_ATS            (1 << 25)
 #define RIO_CAP_T2GPA          (1 << 26)
 #define RIO_CAP_END            (1 << 27)
-#define RIO_CAP_IGS_WIS        (1 << 26) /* 0: MSI | 1: WIS | 0: BOTH */
-#define RIO_CAP_IGS_BOTH       (1 << 26) /* 0:     | 0:     | 1:      */
+#define RIO_CAP_IGS_WIS        (1 << 28)
+#define RIO_CAP_IGS_BOTH       (1 << 29)
 #define RIO_CAP_PMON           (1 << 30)
 
 #define RIO_CAP_REVISION_MASK   0x00000000000000FFULL
@@ -184,6 +187,9 @@ typedef struct RISCVIOMMUDeviceContext {
 #define RIO_PDTP_MODE_PD17         2
 #define RIO_PDTP_MODE_PD8          3
 
+#define RIO_PDTE_VALID            (1ULL << 0)
+#define RIO_PDTE_MASK_PPN          0x00FFFFFFFFFFF000ULL
+
 #define RIO_DCMSI_MASK_PPN         0x00000FFFFFFFFFFFULL
 #define RIO_DCMSI_MASK_MODE        0xF000000000000000ULL
 
@@ -194,6 +200,10 @@ typedef struct RISCVIOMMUDeviceContext {
 #define RIO_MSIPTE_W              (1ULL << 2)
 #define RIO_MSIPTE_C              (1ULL << 63)
 #define RIO_MSIPTE_MASK_PPN        0x003FFFFFFFFFFC00ULL
+#define RIO_MRIF_ADDR_MASK_PPN     0x003FFFFFFFFFFF80ULL
+#define RIO_MRIF_NPPN_MASK_PPN     0x003FFFFFFFFFFC00ULL
+#define RIO_MRIF_NPPN_MASK_N90     0x00000000000003FFULL
+#define RIO_MRIF_NPPN_MASK_N10     0x10000000000003FFULL
 
 typedef struct RISCVIOMMUProcessContext {
     uint64_t fsc;
@@ -266,38 +276,43 @@ typedef struct RISCVIOMMUEvent {
 
 /* RISC-V IOMMU Fault Transaction Type / Exception Codes */
 
-#define RIO_TTYP_NONE              0 /* Fault not caused by an inbound trx */
-#define RIO_TTYP_URX               1 /* Untranslated read for execute trx */
-#define RIO_TTYP_URD               2 /* Untranslated read transaction */
-#define RIO_TTYP_UWR               3 /* Untranslated write/AMO transaction */
-#define RIO_TTYP_TRX               4 /* Translated read for execute trx */
-#define RIO_TTYP_TRD               5 /* Translated read transaction */
-#define RIO_TTYP_TWR               6 /* Translated write/AMO transaction */
-#define RIO_TTYP_ATS               7 /* PCIe ATS Translation Request */
-#define RIO_TTYP_MRQ               8 /* Message Request */
+#define RIO_TTYP_NONE               0 /* Fault not caused by an inbound trx */
+#define RIO_TTYP_URX                1 /* Untranslated read for execute trx */
+#define RIO_TTYP_URD                2 /* Untranslated read transaction */
+#define RIO_TTYP_UWR                3 /* Untranslated write/AMO transaction */
+#define RIO_TTYP_TRX                4 /* Translated read for execute trx */
+#define RIO_TTYP_TRD                5 /* Translated read transaction */
+#define RIO_TTYP_TWR                6 /* Translated write/AMO transaction */
+#define RIO_TTYP_ATS                7 /* PCIe ATS Translation Request */
+#define RIO_TTYP_MRQ                8 /* Message Request */
 
-#define RIO_EXCP_RD_ALIGN          4 /* Read address misaligned */
-#define RIO_EXCP_RD_FAULT          5 /* Read access fault */
-#define RIO_EXCP_WR_ALIGN          6 /* Write/AMO address misaligned */
-#define RIO_EXCP_WR_FAULT          7 /* Write/AMO access fault */
-#define RIO_EXCP_PGFAULT_I        12 /* Instruction page fault */
-#define RIO_EXCP_PGFAULT_RD       13 /* Read page fault */
-#define RIO_EXCP_PGFAULT_WR       15 /* Write/AMO page fault */
-#define RIO_EXCP_GPGFAULT_I       20 /* Instruction guest page fault */
-#define RIO_EXCP_GPGFAULT_RD      21 /* Read guest-page fault */
-#define RIO_EXCP_GPGFAULT_WR      23 /* Write/AMO guest-page fault */
-#define RIO_EXCP_DMA_DISABLED    256 /* Inbound transactions disallowed */
-#define RIO_EXCP_DDT_FAULT       257 /* DDT entry load access fault */
-#define RIO_EXCP_DDT_INVALID     258 /* DDT entry not valid */
-#define RIO_EXCP_DDT_UNSUPPORTED 259 /* DDT entry misconfigured */
-#define RIO_EXCP_REQ_INVALID     260 /* Transaction type disallowed */
-#define RIO_EXCP_PDT_FAULT       261 /* PDT entry load access fault. */
-#define RIO_EXCP_PDT_INVALID     262 /* PDT entry not valid */
-#define RIO_EXCP_PDT_UNSUPPORTED 263 /* PDT entry misconfigured */
-#define RIO_EXCP_MSI_FAULT       264 /* MSI PTE load access fault */
-#define RIO_EXCP_MSI_INVALID     265 /* MSI PTE not valid */
-#define RIO_EXCP_MRIF_FAULT      266 /* MRIF access fault */
-
+#define RIO_CAUSE_EX_FAULT          1 /* Instruction access fault */
+#define RIO_CAUSE_RD_FAULT          5 /* Read access fault */
+#define RIO_CAUSE_WR_FAULT          7 /* Write/AMO access fault */
+#define RIO_CAUSE_EX_FAULT_S       12 /* Instruction page fault */
+#define RIO_CAUSE_RD_FAULT_S       13 /* Read page fault */
+#define RIO_CAUSE_WR_FAULT_S       15 /* Write/AMO page fault */
+#define RIO_CAUSE_EX_FAULT_G       20 /* Instruction guest page fault */
+#define RIO_CAUSE_RD_FAULT_G       21 /* Read guest-page fault */
+#define RIO_CAUSE_WR_FAULT_G       23 /* Write/AMO guest-page fault */
+#define RIO_CAUSE_DMA_DISABLED    256 /* Inbound transactions disallowed */
+#define RIO_CAUSE_DDT_FAULT       257 /* DDT entry load access fault */
+#define RIO_CAUSE_DDT_INVALID     258 /* DDT entry not valid */
+#define RIO_CAUSE_DDT_UNSUPPORTED 259 /* DDT entry misconfigured */
+#define RIO_CAUSE_REQ_INVALID     260 /* Transaction type disallowed */
+#define RIO_CAUSE_MSI_PTE_FAULT   261 /* MSI PTE load access fault */
+#define RIO_CAUSE_MSI_INVALID     262 /* MSI PTE not valid */
+#define RIO_CAUSE_MSI_UNSUPPORTED 263 /* MSI PTE entry misconfigured */
+#define RIO_CAUSE_MRIF_FAULT      264 /* MRIF access fault */
+#define RIO_CAUSE_PDT_FAULT       265 /* PDT load access fault */
+#define RIO_CAUSE_PDT_INVALID     266 /* PDT not valid */
+#define RIO_CAUSE_PDT_UNSUPPORTED 267 /* PDT entry misconfigured */
+#define RIO_CAUSE_DDT_CORRUPTED   268 /* DDT entry corrupted */
+#define RIO_CAUSE_PDT_CORRUPTED   269 /* PDT entry corrupted */
+#define RIO_CAUSE_MSI_CORRUPTED   270 /* MSI entry corrupted */
+#define RIO_CAUSE_MRIF_CORRUPTED  271 /* DDT entry corrupted */
+#define RIO_CAUSE_ERROR           272 /* Internal data error */
+#define RIO_CAUSE_MSI_FAULT       273 /* MSI write access fault */
 
 /* QEMU RISC-V IOMMU Device Emulation Objects */
 
