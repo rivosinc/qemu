@@ -96,9 +96,9 @@
 /* Device directory mode values, within RIO_DDTP_MASK_MODE */
 #define RIO_DDTP_MODE_OFF       0
 #define RIO_DDTP_MODE_BARE      1
-#define RIO_DDTP_MODE_3LVL      2
+#define RIO_DDTP_MODE_1LVL      2
 #define RIO_DDTP_MODE_2LVL      3
-#define RIO_DDTP_MODE_1LVL      4
+#define RIO_DDTP_MODE_3LVL      4
 #define RIO_DDTP_MODE_MAX       RIO_DDTP_MODE_1LVL
 
 /* Command queue base register */
