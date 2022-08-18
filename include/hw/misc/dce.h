@@ -129,6 +129,7 @@ enum {
     DCE_EXEC_WQMCC,
     DCE_EXEC_NOTIFY,
     DCE_EXEC_READY_TO_RUN,
+    DCE_EXEC_RESET_ARB_WEIGHT,
     DCE_EXEC_GLOBAL_CONFIG,
     DCE_EXEC_LAST
 };
@@ -152,12 +153,27 @@ REG32(DCE_WQCR,     96)
     FIELD(DCE_WQCR, ABORT, 8, 1)
     FIELD(DCE_WQCR, STATUS, 16, 1)
 
-/* Aligned ? */
-#define DCE_REG_WQITBA      0x0
-#define DCE_REG_WQRUNSTS    0x10
-#define DCE_REG_WQENABLE    0x18
-#define DCE_REG_WQIRQSTS    0x20
-#define DCE_REG_WQCR        0x0
+#define WQMCC                       0
+#define GLOB_CONF                   127
+
+/* WQMCC Page */
+#define DCE_REG_WQITBA                  0x0
+#define DCE_REG_WQRUNSTS                0x10
+#define DCE_REG_WQENABLE                0x18
+#define DCE_REG_WQIRQSTS                0x20
+
+/* WQCR Page */
+#define DCE_REG_WQCR                    0x0
+
+/* Global Config Page */
+#define DCE_REG_FUNC_SAVE               0x0  /* 0x0 - 0x40 */
+#define DCE_REG_FUNC_SAVE_TRANS_CTL     0x40
+#define DCE_REG_ARB_WGT                 0x48 /* 0x48 - 0x50 */
+#define DCE_REG_KEY_SLOT_OWNERSHIP      0x50 /* 0x50 - 0x60 */
+#define DCE_REG_FUNC_WQ_PROCESSING_CTL  0x60
+#define DCE_REG_FUNC_WQ_RUN_STS         0x68 /* 0x68 - 0x78 */
+
+
 
 #define TYPE_RISCV_DCE_MEMORY_REGION "x-riscv-dce-mr"
 typedef struct RISCVDCESpace RISCVDCESpace;

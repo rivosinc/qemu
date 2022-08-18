@@ -119,6 +119,7 @@ extern bool pci_available;
 /* Rivos */
 #define PCI_VENDOR_ID_RIVOS              0x1fed
 #define PCI_DEVICE_ID_RIVOS_DCE          0x0001
+#define PCI_DEVICE_ID_RIVOS_DCE_VF       0x0002
 
 #define FMT_PCIBUS                      PRIx64
 

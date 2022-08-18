@@ -27,6 +27,12 @@
 #define DCE_AES_KEYLEN    32
 #define NUM_WQ            64
 
+#define DCE_CAP_SRIOV_OFFSET 0x160
+#define DCE_TOTAL_VFS 7
+#define DCE_VF_OFFSET 0x80
+#define DCE_VF_STRIDE 1
+
+#define DCE_DEFAULT_ARB_WEIGHT 0x0101010101010101LLU
 typedef struct DCEState
 {
     PCIDevice dev;
@@ -38,9 +44,6 @@ typedef struct DCEState
     bool enable;
     uint64_t dma_mask;
 
-    // WQMCC_t WQMCC;
-    // uint32_t WQCR[NUM_WQ];
-
     /* Storage for 8 32B keys */
 	unsigned char keys[8][32];
 
@@ -48,6 +51,18 @@ typedef struct DCEState
     QemuCond core_cond;   /* Background processing wakeup signal */
     QemuMutex core_lock;  /* Global IOMMU lock, used for cache/regs updates */
     unsigned core_exec;   /* Processing thread execution actions */
+
+    /* only used by VFs */
+    struct DCEState * pfstate;
+    bool isVF;
+    int vfnum;
+
+    /* only used by PF */
+    struct DCEState * all_states[DCE_TOTAL_VFS + 1]; /* first DCE_TOTAL_VFS are VF entries, last one is PF */
+
+    /* global config */
+    uint64_t arb_weight;
+    uint32_t arb_weight_sum;
 } DCEState;
 
 static bool dce_msi_enabled(DCEState *state)
@@ -390,7 +405,7 @@ static int dce_crypto(DCEState *state,
 {
 
     /* TODO sanity check the size / alignment */
-    printf("In %s\n", __func__);
+    // printf("In %s\n", __func__);
     uint8_t iv[16], key[64];
     int err = 0, ret = 0;
 
@@ -625,24 +640,18 @@ static void finish_descriptor(DCEState *state, int WQ_id,
 }
 
 #define TYPE_PCI_DCE_DEVICE "dce"
+#define TYPE_PCI_DCEVF_DEVICE "dcevf"
+
 DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
-static void dce_obj_uint64(Object *obj, Visitor *v, const char *name,
-                           void *opaque, Error **errp)
-{
-    uint64_t *val = opaque;
+// static void dce_obj_uint64(Object *obj, Visitor *v, const char *name,
+//                            void *opaque, Error **errp)
+// {
+//     uint64_t *val = opaque;
 
-    visit_type_uint64(v, name, val, errp);
-}
+//     visit_type_uint64(v, name, val, errp);
+// }
 
-static void dce_instance_init(Object *obj) {
-    DCEState *state = DCE(obj);
-    state->dma_mask = (1UL << 28) - 1;
-    object_property_add(obj, "dma_mask", "uint64", dce_obj_uint64,
-                    dce_obj_uint64, NULL, &state->dma_mask);
-}
-
-static void dce_uninit(PCIDevice *dev) {}
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -657,16 +666,17 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                     unsigned size)
 {
-    printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
+    // printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
 
     DCEState *s = (DCEState*) opaque;
+
     uint32_t page = addr / DCE_PAGE_SIZE;
     addr = addr % DCE_PAGE_SIZE;
-    uint32_t regb = (addr + size - 1) & ~3;
     uint32_t exec = 0;
     // uint32_t busy = 0;
 
-    printf("regb 0x%x, addr 0x%lx, page %d\n", regb, addr, page);
+    // uint32_t regb = (addr + size - 1) & ~3;
+    // printf("regb 0x%x, addr 0x%lx, page %d\n", regb, addr, page);
     if (size == 0 || size > 8 || (addr & (size - 1)) != 0) {
         /* Unsupported MMIO alignment or access size */
         return;
@@ -677,17 +687,20 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     }
 
-    if (page == 0) {
+    if (page == WQMCC) {
         /* WQMCC page */
     }
-    else if (1 <= page && page <= 64) {
+    else if (WQMCC < page && page <= NUM_WQ) {
         /* WQCR pages */
         if (addr == DCE_REG_WQCR) {
             exec |= BIT(DCE_EXEC_NOTIFY);
         }
     }
-    else if (page == 127) {
+    else if (page == GLOB_CONF) {
         /* Global config page */
+        if (addr == DCE_REG_FUNC_WQ_PROCESSING_CTL) {
+            exec |= BIT(DCE_EXEC_RESET_ARB_WEIGHT);
+        }
     }
 
     qemu_mutex_lock(&s->core_lock);
@@ -713,11 +726,12 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         stq_le_p(&s->regs_rw[page][addr], ((rw & ro) | (val & ~ro)) & ~(val & wc));
     }
     qemu_mutex_unlock(&s->core_lock);
-    printf("Exec %d\n", exec);
+    // printf("Exec %d\n", exec);
     if (exec) {
-        qatomic_or(&s->core_exec, exec);
+        /* set the execute flag on the pf */
+        qatomic_or(&(s->pfstate->core_exec), exec);
         printf("Signaling conditioon\n");
-        qemu_cond_signal(&s->core_cond);
+        qemu_cond_signal(&(s->pfstate->core_cond));
     }
 }
 
@@ -737,40 +751,51 @@ static void set_ready_to_run_all_places(DCEState * state, int WQ_id, int val)
     /* should already hold lock */
     uint32_t WQCR = ldl_le_p(&state->regs_rw[WQ_id+1][DCE_REG_WQCR]);
     WQCR = FIELD_DP32(WQCR, DCE_WQCR, STATUS, val);
-    stq_le_p(&state->regs_rw[WQ_id+1][DCE_REG_WQCR], WQCR);
+    stl_le_p(&state->regs_rw[WQ_id+1][DCE_REG_WQCR], WQCR);
 
-    uint64_t WQRUNSTS = ldl_le_p(&state->regs_rw[0][DCE_REG_WQRUNSTS]);
+    uint64_t WQRUNSTS = ldq_le_p(&state->regs_rw[0][DCE_REG_WQRUNSTS]);
     WQRUNSTS = deposit64(WQRUNSTS, WQ_id, 1, val);
     stq_le_p(&state->regs_rw[0][DCE_REG_WQRUNSTS], WQRUNSTS);
-    /* TODO: Global config */
+
+    /* FIXME lock for global config page? */
+    uint64_t WQRUNSTS_GLOB =
+        ldq_le_p(&state->regs_rw[GLOB_CONF][DCE_REG_FUNC_WQ_RUN_STS]);
+    int Fn = state->isVF ? state->vfnum + 1 : 0;
+    /* index into the function */
+    WQRUNSTS_GLOB += (Fn * 8);
+    WQRUNSTS = deposit64(WQRUNSTS_GLOB, WQ_id, 1, val);
+    stq_le_p(&state->regs_rw[GLOB_CONF][DCE_REG_FUNC_WQ_RUN_STS], WQRUNSTS);
+
 }
 
-static void process_wqs (DCEState * state) {
+static void process_wqs(DCEState * state) {
 
+    assert(state);
     uint64_t base = 0, head = 0, head_mod = 0, tail = 0;
     dma_addr_t WQITBA = ldq_le_p(&state->regs_rw[0][DCE_REG_WQITBA]);
     uint64_t WQENABLE = ldq_le_p(&state->regs_rw[0][DCE_REG_WQENABLE]);
-    printf("WQITBA: 0x%lx\n", WQITBA);
-    WQITE * WQITEs = calloc(4, 0x1000);
-    pci_dma_read(&state->dev, WQITBA, WQITEs, 0x4000);
+    // printf("WQITBA: 0x%lx\n", WQITBA);
+    WQITE * WQITEs = calloc(1, 0x1000);
+    pci_dma_read(&state->dev, WQITBA, WQITEs, 0x1000);
 
     /* Iterate thru all WQs and see if there is any work to do */
     for (int i = 0; i < NUM_WQ; i ++) {
         /* skip the WQ if it is not enabled */
-        if (!(WQENABLE & BIT(i))) continue;
+        if (!(WQENABLE & BIT(i)))
+            continue;
 
         /* WQCR begins at page 1 */
         uint32_t WQCR = ldl_le_p(&state->regs_rw[i+1][DCE_REG_WQCR]);
 
         if (FIELD_EX32(WQCR, DCE_WQCR, STATUS) == READY_TO_RUN) {
-            printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
-                WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
+            // printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
+            //     WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
             base = WQITEs[i].DSCBA;
             /* get the head and tail pointer information */
             pci_dma_read(&state->dev, WQITEs[i].DSCPTA, &head, 8);
             pci_dma_read(&state->dev, WQITEs[i].DSCPTA + 8, &tail, 8);
-            printf("base is 0x%lx, head is %lu, tail is %lu\n",
-                base, head, tail);
+            // printf("base is 0x%lx, head is %lu, tail is %lu\n",
+            //     base, head, tail);
             /* keep processing until we catch up */
             while (head < tail) {
                 head_mod = head %= 64;
@@ -793,10 +818,14 @@ static void process_wqs (DCEState * state) {
     free(WQITEs);
 }
 
-static void process_notify (DCEState * state, unsigned * exec) {
+static void process_notify(DCEState * state, unsigned * exec) {
+
+    assert(state);
+    // printf("in %s\n", __func__);
     for (int i = 0; i < NUM_WQ; i ++) {
         qemu_mutex_lock(&state->core_lock);
         uint32_t WQCR = ldl_le_p(&state->regs_rw[i+1][DCE_REG_WQCR]);
+        // printf("WQCR is 0x%x\n", WQCR);
         if (FIELD_EX32(WQCR, DCE_WQCR, NOTIFY) == 1) {
             /* clear notify, and set status to ready to run */
             WQCR = FIELD_DP32(WQCR, DCE_WQCR, NOTIFY, 0);
@@ -811,30 +840,70 @@ static void process_notify (DCEState * state, unsigned * exec) {
     }
 }
 
+static void reset_func_weights(DCEState * state) {
+    /* FIXME: check is PF state */
+    state->arb_weight_sum = 0;
+    uint8_t * temp;
+    for (int i = 0; i < 8; i++) {
+        temp = (uint8_t * )&state->arb_weight;
+        state->arb_weight_sum += *temp;
+    }
+    qemu_mutex_lock(&state->core_lock);
+    stq_le_p(&state->regs_rw[GLOB_CONF][DCE_REG_ARB_WGT], state->arb_weight);
+    qemu_mutex_unlock(&state->core_lock);
+}
+
 static void *dce_core_proc(void* arg)
 {
-    DCEState * state = arg;
+    DCEState * pfstate = arg;
+    DCEState * state;
 
     unsigned exec = 0;
     unsigned mask = 0;
 
+    uint8_t credit = 0;
+
     while(1) {
         // printf("exec is 0x%x\n", exec);
         mask = (mask ? mask : BIT(DCE_EXEC_LAST)) >> 1;
-        switch (exec & mask) {
-            case BIT(DCE_EXEC_NOTIFY):
-                process_notify(state, &exec);
-                break;
-            case BIT(DCE_EXEC_READY_TO_RUN):
-                process_wqs(state);
-                break;
+        if (pfstate->arb_weight_sum == 0)
+            reset_func_weights(pfstate);
+        for(int i = 0; i <= DCE_TOTAL_VFS; i++) {
+            qemu_mutex_lock(&pfstate->core_lock);
+            credit = pfstate->regs_rw[GLOB_CONF][DCE_REG_ARB_WGT + i];
+            /* deduct from the credit */
+            if (credit > 0) {
+                pfstate->regs_rw[GLOB_CONF][DCE_REG_ARB_WGT + i]--;
+                pfstate->arb_weight_sum--;
+            }
+            qemu_mutex_unlock(&pfstate->core_lock);
+            /* skip the function if credit has already been depleted */
+            // printf("Credit is %d for VF %d\n", credit, i);
+            if (credit == 0) continue;
+
+            state = pfstate->all_states[i];
+            if (!state) continue;
+            switch (exec & mask) {
+                /* FIXME make these bits per function? */
+                case BIT(DCE_EXEC_NOTIFY):
+                    process_notify(state, &exec);
+                    break;
+                case BIT(DCE_EXEC_READY_TO_RUN):
+                    process_wqs(state);
+                    break;
+                case BIT(DCE_EXEC_RESET_ARB_WEIGHT) :
+                    /* FIXME: this is a global operation */
+                    reset_func_weights(pfstate);
+                    exec &= ~BIT(DCE_EXEC_RESET_ARB_WEIGHT);
+                    break;
+            }
         }
         exec &= ~mask;
-        exec |= qatomic_xchg(&state->core_exec, 0);
+        exec |= qatomic_xchg(&pfstate->core_exec, 0);
         if (!exec) {
-            qemu_mutex_lock(&state->core_lock);
-            qemu_cond_wait(&state->core_cond, &state->core_lock);
-            qemu_mutex_unlock(&state->core_lock);
+            qemu_mutex_lock(&pfstate->core_lock);
+            qemu_cond_wait(&pfstate->core_cond, &pfstate->core_lock);
+            qemu_mutex_unlock(&pfstate->core_lock);
         }
         // printf("woken up!\n");
     }
@@ -844,19 +913,16 @@ static void *dce_core_proc(void* arg)
 #include "qemu/units.h"
 static void dce_realize(PCIDevice *dev, Error **errp)
 {
+    // printf("in %s\n", __func__);
     DCEState *state = DO_UPCAST(DCEState, dev, dev);
 
     dev->cap_present |= QEMU_PCI_CAP_EXPRESS;
 
     pci_config_set_interrupt_pin(dev->config, 1);
 
-    int ret = msi_init(&state->dev, 0, 1, true, false, errp);
-
-    if (ret != 0) {
-        printf("MSI INIT FAILED\n");
-    }
     memory_region_init_io(&state->mmio, OBJECT(state),
         &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
+    // printf("dce mmio: 0x%lx \n",state->mmio.addr);
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
 
     /* Mark all registers read-only */
@@ -869,11 +935,96 @@ static void dce_realize(PCIDevice *dev, Error **errp)
     for (int i = 1; i <= 64; i++) {
         stw_le_p(&state->regs_ro[i][DCE_REG_WQCR], 0);
     }
+
+    int ret = pcie_endpoint_cap_init(dev, 0xa0);
+    if (ret < 0) {
+        printf("caps INIT FAILED\n");
+    }
+    ret = msi_init(&state->dev, 0, 1, true, false, errp);
+    if (ret != 0) {
+        printf("MSI INIT FAILED\n");
+    }
+    pcie_ari_init(dev, 0x100, 1);
+
+    pcie_sriov_pf_init(dev, 0x160, TYPE_PCI_DCEVF_DEVICE,
+                       PCI_DEVICE_ID_RIVOS_DCE_VF, DCE_TOTAL_VFS, DCE_TOTAL_VFS,
+                       DCE_VF_OFFSET, DCE_VF_STRIDE);
+
+    /* 3.5 MiB of VFBAR */
+    pcie_sriov_pf_init_vf_bar(dev, 0, PCI_BASE_ADDRESS_MEM_TYPE_64 ,
+                              0x380000);
+
+    state->pfstate = state;
+    state->isVF = false;
+
+    state->all_states[DCE_TOTAL_VFS] = state;
     /* start the core thread */
     qemu_cond_init(&state->core_cond);
     qemu_mutex_init(&state->core_lock);
+
+    /* config intialization */
+    /* initialize arb weight */
+    state->arb_weight = DCE_DEFAULT_ARB_WEIGHT;
+    reset_func_weights(state);
+    /* initialize global function WQ processing control */
+    state->regs_rw[GLOB_CONF][DCE_REG_FUNC_WQ_PROCESSING_CTL] = 0xff;
+
     qemu_thread_create(&state->core_proc, "dce-core",
         dce_core_proc, state, QEMU_THREAD_JOINABLE);
+}
+
+static void dcevf_realize(PCIDevice *dev, Error **errp)
+{
+    // printf("in %s\n", __func__);
+    uint16_t vfnum = pcie_sriov_vf_number(dev);
+    // printf("in %s, setting up VF number %d\n", __func__, vfnum);
+    DCEState *vfstate = DO_UPCAST(DCEState, dev, dev);
+
+    PCIDevice * pfdev = pcie_sriov_get_pf(dev);
+    DCEState *pfstate = DO_UPCAST(DCEState, dev, pfdev);
+
+    pfstate->all_states[vfnum] = vfstate;
+
+    vfstate->pfstate = pfstate;
+    vfstate->isVF = true;
+    vfstate->vfnum = vfnum;
+
+    MemoryRegion *mr = &vfstate->mmio;
+
+    memory_region_init_io(mr, OBJECT(vfstate), &dce_mmio_ops, vfstate,
+            "dcevf-mmio", 512 * KiB);
+    pcie_sriov_vf_register_bar(dev, 0, mr);
+
+    int ret = pcie_endpoint_cap_init(dev, 0xa0);
+    if (ret < 0) {
+        printf("VF error: cap\n");
+    }
+    pcie_ari_init(dev, 0x100, 1);
+
+    qemu_cond_init(&vfstate->core_cond);
+    qemu_mutex_init(&vfstate->core_lock);
+}
+
+static void dcevf_instance_init(Object *obj) {}
+static void dce_instance_init(Object *obj) {}
+
+static void dce_uninit(PCIDevice *dev) {}
+static void dcevf_uninit(PCIDevice *dev) {}
+
+static void dcevf_class_init(ObjectClass *class, void *data)
+{
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(class);
+    k->realize      = dcevf_realize;
+    k->exit         = dcevf_uninit;
+    k->vendor_id    = PCI_VENDOR_ID_RIVOS;
+    k->device_id    = PCI_DEVICE_ID_RIVOS_DCE;
+    k->class_id     = PCI_CLASS_OTHERS;
+//     k->config_read  = dce_config_read;
+//     k->config_write = dce_config_write;
+
+    DeviceClass *dc = DEVICE_CLASS(class);
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    dc->desc = "DCE Virtual Function";
 }
 
 static void dce_class_init(ObjectClass *class, void *data)
@@ -889,6 +1040,7 @@ static void dce_class_init(ObjectClass *class, void *data)
 
     DeviceClass *dc = DEVICE_CLASS(class);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+    dc->desc = "DCE Physical Function";
 }
 
 static const TypeInfo dce_info = {
@@ -898,7 +1050,19 @@ static const TypeInfo dce_info = {
     .instance_init = dce_instance_init,
     .class_init    = dce_class_init,
     .interfaces    = (InterfaceInfo[]) {
-        { INTERFACE_CONVENTIONAL_PCI_DEVICE },
+        { INTERFACE_PCIE_DEVICE },
+        { }
+    }
+};
+
+static const TypeInfo dcevf_info = {
+    .name          = TYPE_PCI_DCEVF_DEVICE,
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(DCEState),
+    .instance_init = dcevf_instance_init,
+    .class_init    = dcevf_class_init,
+    .interfaces    = (InterfaceInfo[]) {
+        { INTERFACE_PCIE_DEVICE },
         { }
     }
 };
@@ -906,6 +1070,7 @@ static const TypeInfo dce_info = {
 static void dce_register(void)
 {
     type_register_static(&dce_info);
+    type_register_static(&dcevf_info);
 }
 
 type_init(dce_register);
