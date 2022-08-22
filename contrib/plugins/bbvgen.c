@@ -32,6 +32,7 @@
  *   See the COPYING file in the top-level directory.
  */
 
+#include <sys/syscall.h>
 #include <inttypes.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -47,7 +48,9 @@
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
+static char bbv_path[PATH_MAX] = {0};
 static gzFile bbv_file = Z_NULL;
+static char bbvi_path[PATH_MAX] = {0};
 static gzFile bbvi_file = Z_NULL;
 
 static GMutex lock;
@@ -63,6 +66,10 @@ static uint64_t drift = 0;      /* track drift of interval start */
 static uint32_t interval = 0;
 static uint64_t intv_start_pc = -1;
 static uint64_t total_insns = 0;
+
+static int64_t clone_syscall_num = -1;
+
+static void outfile_init(void);
 
 // BlockInfo records details about a particular TCG translation block
 // and its execution stats. The '*_count' members track the number of
@@ -90,6 +97,64 @@ static gint cmp_exec_count(gconstpointer a, gconstpointer b)
     BlockInfo *ea = (BlockInfo *) a;
     BlockInfo *eb = (BlockInfo *) b;
     return ea->exec_count > eb->exec_count ? -1 : 1;
+}
+
+static void reset_block(gpointer key, gpointer value, gpointer user_data)
+{
+    BlockInfo* blkinfo = (BlockInfo*)value;
+    blkinfo->exec_count = 0;
+    blkinfo->total_count = 0;
+};
+
+// Called on the child process after a fork.
+// Resets counts and opens new output files with the child pid
+// appended to the filename.
+static void handle_fork_child(void)
+{
+    pid_t me = getpid();
+    if (bbv_file) {
+        char extension[100];
+        int extlen = snprintf(extension, sizeof(extension), ".%u", me);
+        assert(extlen > 0);  // sanity-check
+        // Make sure we don't blow our path length:
+        assert(strlen(bbv_path) + extlen < sizeof(bbv_path));
+        strncat(bbv_path, extension, extlen);
+    }
+    if (bbvi_file) {
+        char extension[100];
+        int extlen = snprintf(extension, sizeof(extension), ".%u", me);
+        assert(extlen > 0);  // sanity-check
+        // Make sure we don't blow our path length:
+        assert(strlen(bbvi_path) + extlen < sizeof(bbvi_path));
+        strncat(bbvi_path, extension, extlen);
+    }
+
+    // Zlib doesn't seem to have a way to tear down local state +
+    // close the underlying file descriptor, which we would prefer
+    // (since the parent process will continue writing to this
+    // file). Instead, we leak.
+
+    // TODO: Find a way to not leak memory + open fd
+    outfile_init();
+
+    // Reset counts
+    cur_insns = 0;
+    drift = 0;
+    interval = 0;
+    total_insns = 0;
+    g_mutex_lock(&lock);
+    g_hash_table_foreach(allblocks, reset_block, NULL);
+    g_mutex_unlock(&lock);
+}
+
+static void vcpu_syscall_ret(qemu_plugin_id_t id, unsigned int vcpu_idx,
+                             int64_t num, int64_t ret)
+{
+    if (num != clone_syscall_num || ret != 0) {
+        return;
+    }
+    // We are officialy the child process in a fork that's returning.
+    handle_fork_child();
 }
 
 static void dump_interval(GList *blocks)
@@ -240,11 +305,35 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
     }
 }
 
-static void plugin_init(void)
+static void outfile_init(void)
 {
+    if (bbv_path[0]) {
+        bbv_file = gzopen(bbv_path, "wb9");
+        if (bbv_file == Z_NULL) {
+            printf("Can't open %s\n", bbv_path);
+        }
+        assert(bbv_file != Z_NULL);
+    }
+    if (bbvi_path[0]) {
+        bbvi_file = gzopen(bbvi_path, "wb9");
+        if (bbv_file == Z_NULL) {
+            printf("Can't open %s\n", bbvi_path);
+        }
+        assert(bbvi_file != Z_NULL);
+        gzprintf(bbvi_file, "{\n    \"source\" : \"qemu-bbvgen\",\n");
+        gzprintf(bbvi_file, "    \"intervals\" : [\n");
+    }
+}
+
+static void plugin_init(const char* target)
+{
+    if (g_strcmp0(target, "riscv64") == 0) {
+        clone_syscall_num = 220;
+    } else {
+        printf("%s:%d: Unhandled target! Please fix!\n", __FILE__, __LINE__);
+    }
+
     allblocks = g_hash_table_new(NULL, g_direct_equal);
-    gzprintf(bbvi_file, "{\n    \"source\" : \"qemu-bbvgen\",\n");
-    gzprintf(bbvi_file, "    \"intervals\" : [\n");
 }
 
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
@@ -335,15 +424,11 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         g_autofree char **tokens = g_strsplit(opt, "=", 2);
 
         if (g_strcmp0(tokens[0], "bbv") == 0) {
-            bbv_file = gzopen(tokens[1], "wb9");
-            if (bbv_file == Z_NULL) {
-                return -1;
-            }
+            assert(strlen(tokens[1]) < sizeof(bbv_path));
+            strncpy(bbv_path, tokens[1], sizeof(bbv_path));
         } else if (g_strcmp0(tokens[0], "bbvi") == 0) {
-            bbvi_file = gzopen(tokens[1], "wb9");
-            if (bbvi_file == Z_NULL) {
-                return -1;
-            }
+            assert(strlen(tokens[1]) < sizeof(bbvi_path));
+            strncpy(bbvi_path, tokens[1], sizeof(bbvi_path));
         } else if (g_strcmp0(tokens[0], "ilen") == 0) {
             intv_length = strtoull(tokens[1], NULL, 0);
         } else if (g_strcmp0(tokens[0], "nblocks") == 0) {
@@ -353,6 +438,8 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
             return -1;
         }
     }
+
+    outfile_init();
 
     if (bbv_file == Z_NULL && bbvi_file == Z_NULL) {
         fprintf(stderr, "bbvgen: at least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
@@ -368,8 +455,9 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         hot_count = strtoul(opt, NULL, 0);
     }
 
-    plugin_init();
+    plugin_init(info->target_name);
 
+    qemu_plugin_register_vcpu_syscall_ret_cb(id, vcpu_syscall_ret);
     qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
     return 0;
