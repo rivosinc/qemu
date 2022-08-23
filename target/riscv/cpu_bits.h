@@ -209,6 +209,7 @@
 /* Supervisor Protection and Translation */
 #define CSR_SPTBR           0x180
 #define CSR_SATP            0x180
+#define CSR_SQOSCFG         0x181
 
 /* Supervisor-Level Window to Indirectly Accessed Registers (AIA) */
 #define CSR_SISELECT        0x150
@@ -795,4 +796,9 @@ typedef enum RISCVException {
 #define SEED_OPST_WAIT                   (0b01 << 30)
 #define SEED_OPST_ES16                   (0b10 << 30)
 #define SEED_OPST_DEAD                   (0b11 << 30)
+
+/* SQOSCFG BITS (QOSID) */
+#define SQOSCFG_RCID                      0x00000FFF
+#define SQOSCFG_MCID                      0x0FFF0000
+
 #endif
