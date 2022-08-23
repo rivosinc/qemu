@@ -212,7 +212,26 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
         blocks = g_list_sort(blocks, cmp_exec_count);
         gzprintf(bbvi_file, "    \"blocks\" : [\n");
         emit_hot_blocks(blocks, hot_count, total_insns, 8);
-        bool more = false;
+        bool more = true;
+        gzprintf(bbvi_file, "    ]%s\n", more ? "," : "");
+        g_list_free(blocks);
+        blocks = NULL;
+
+        // Dump a sorted list of block IDs with block info
+        g_hash_table_foreach(allblocks, filter_block, (gpointer)&blocks);
+        blocks = g_list_sort(blocks, cmp_bbid);
+        gzprintf(bbvi_file, "    \"ids\" : [\n");
+        GList *it = blocks;
+        for (unsigned i = 0; it; i++, it = it->next) {
+            BlockInfo *blkinfo = (BlockInfo *)it->data;
+            if (i > 0) {
+                gzprintf(bbvi_file, ",\n");
+            }
+            gzprintf(bbvi_file, "        {\"id\" : %"PRIu64", \"pc\" : %"PRIu64", \"insns\" : %lu }",
+                    blkinfo->id, blkinfo->start_addr, blkinfo->insns);
+        }
+        gzprintf(bbvi_file, "\n");
+        more = false;
         gzprintf(bbvi_file, "    ]%s\n", more ? "," : "");
         g_list_free(blocks);
 
@@ -264,8 +283,13 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
         intv_start_pc = pc;
     }
 
-    // The start PC should uniquely identify a BB, even as previous
-    // blocks are carved up by new branches into them.
+    // The start PC should uniquely identify a BB, even as new blocks
+    // get carved out by new branches into the middle of existing ones.
+    // If a new, shorter block "B" is created by a branch into the
+    // middle of an existing one "A", block B will receive counts only
+    // for execution paths that branch directly to B and skip the start
+    // of block A. Block A will continue to receive counts for
+    // executions that enter at its start PC.
     const uint64_t hash = pc;
 
     g_mutex_lock(&lock);
