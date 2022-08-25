@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2003-2022 Eelco Dolstra and the Nixpkgs/NixOS contributors
 # Licensed under the MIT License, see LICENSE for details.
 # SPDX-License-Identifier: MIT
-
 # Rivos changes:
 # Added src and version arguments.
 # Removed darwin-specific optionals.
@@ -10,106 +9,178 @@
 # Add plugins to a separate output.
 # Remove patches from PR https://github.com/NixOS/nixpkgs/pull/183848
 # Remove big-parallel feature requirement.
-
-{ lib, stdenv, fetchurl, fetchpatch, python3, python3Packages, zlib, pkg-config, glib, buildPackages
-, perl, pixman, vde2, alsa-lib, texinfo, flex
-, bison, lzo, snappy, libaio, libtasn1, gnutls, nettle, curl, ninja, meson
-, makeWrapper, runtimeShell, removeReferencesTo
-, attr, libcap, libcap_ng, socat
-, guestAgentSupport ? with stdenv.hostPlatform; isLinux || isSunOS || isWindows
-, numaSupport ? stdenv.isLinux && !stdenv.isAarch32, numactl
-, seccompSupport ? stdenv.isLinux, libseccomp
-, alsaSupport ? false
-, pulseSupport ? false, libpulseaudio
-, sdlSupport ? false, SDL2, SDL2_image
-, jackSupport ? false, libjack2
-, gtkSupport ? false, gtk3, gettext, vte, wrapGAppsHook
-, vncSupport ? false, libjpeg, libpng
-, smartcardSupport ? false, libcacard
-, spiceSupport ? false, spice, spice-protocol
-, ncursesSupport ? !nixosTestRunner, ncurses
-, usbredirSupport ? spiceSupport, usbredir
-, xenSupport ? false, xen
-, cephSupport ? false, ceph
-, glusterfsSupport ? false, glusterfs, libuuid
-, openGLSupport ? sdlSupport, mesa, libepoxy, libdrm
-, virglSupport ? openGLSupport, virglrenderer
-, libiscsiSupport ? true, libiscsi
-, smbdSupport ? false, samba
-, tpmSupport ? true
-, uringSupport ? stdenv.isLinux, liburing
-, hostCpuOnly ? false
-, hostCpuTargets ? (if hostCpuOnly
-                    then (lib.optional stdenv.isx86_64 "i386-softmmu"
-                          ++ ["${stdenv.hostPlatform.qemuArch}-softmmu"])
-                    else null)
-, nixosTestRunner ? false
-, doCheck ? false
-, qemu  # for passthru.tests
-, src
-, version
+{
+  lib,
+  stdenv,
+  fetchurl,
+  fetchpatch,
+  python3,
+  python3Packages,
+  zlib,
+  pkg-config,
+  glib,
+  buildPackages,
+  perl,
+  pixman,
+  vde2,
+  alsa-lib,
+  texinfo,
+  flex,
+  bison,
+  lzo,
+  snappy,
+  libaio,
+  libtasn1,
+  gnutls,
+  nettle,
+  curl,
+  ninja,
+  meson,
+  makeWrapper,
+  runtimeShell,
+  removeReferencesTo,
+  attr,
+  libcap,
+  libcap_ng,
+  socat,
+  guestAgentSupport ? with stdenv.hostPlatform; isLinux || isSunOS || isWindows,
+  numaSupport ? stdenv.isLinux && !stdenv.isAarch32,
+  numactl,
+  seccompSupport ? stdenv.isLinux,
+  libseccomp,
+  alsaSupport ? false,
+  pulseSupport ? false,
+  libpulseaudio,
+  sdlSupport ? false,
+  SDL2,
+  SDL2_image,
+  jackSupport ? false,
+  libjack2,
+  gtkSupport ? false,
+  gtk3,
+  gettext,
+  vte,
+  wrapGAppsHook,
+  vncSupport ? false,
+  libjpeg,
+  libpng,
+  smartcardSupport ? false,
+  libcacard,
+  spiceSupport ? false,
+  spice,
+  spice-protocol,
+  ncursesSupport ? !nixosTestRunner,
+  ncurses,
+  usbredirSupport ? spiceSupport,
+  usbredir,
+  xenSupport ? false,
+  xen,
+  cephSupport ? false,
+  ceph,
+  glusterfsSupport ? false,
+  glusterfs,
+  libuuid,
+  openGLSupport ? sdlSupport,
+  mesa,
+  libepoxy,
+  libdrm,
+  virglSupport ? openGLSupport,
+  virglrenderer,
+  libiscsiSupport ? true,
+  libiscsi,
+  smbdSupport ? false,
+  samba,
+  tpmSupport ? true,
+  uringSupport ? stdenv.isLinux,
+  liburing,
+  hostCpuOnly ? false,
+  hostCpuTargets ? (
+    if hostCpuOnly
+    then
+      (lib.optional stdenv.isx86_64 "i386-softmmu"
+        ++ ["${stdenv.hostPlatform.qemuArch}-softmmu"])
+    else null
+  ),
+  nixosTestRunner ? false,
+  doCheck ? false,
+  qemu, # for passthru.tests
+  src,
+  version,
 }:
-
 stdenv.mkDerivation rec {
-  pname = "qemu"
+  pname =
+    "qemu"
     + lib.optionalString xenSupport "-xen"
     + lib.optionalString hostCpuOnly "-host-cpu-only"
     + lib.optionalString nixosTestRunner "-for-vm-tests";
 
   inherit src version;
 
-  depsBuildBuild = [ buildPackages.stdenv.cc ];
+  depsBuildBuild = [buildPackages.stdenv.cc];
 
-  nativeBuildInputs = [ makeWrapper removeReferencesTo pkg-config flex bison meson ninja perl python3 python3Packages.sphinx python3Packages.sphinx_rtd_theme ]
-    ++ lib.optionals gtkSupport [ wrapGAppsHook ];
+  nativeBuildInputs =
+    [makeWrapper removeReferencesTo pkg-config flex bison meson ninja perl python3 python3Packages.sphinx python3Packages.sphinx_rtd_theme]
+    ++ lib.optionals gtkSupport [wrapGAppsHook];
 
-  buildInputs = [ zlib glib perl pixman
-    vde2 texinfo lzo snappy libtasn1
-    gnutls nettle curl
-  ]
-    ++ lib.optionals ncursesSupport [ ncurses ]
-    ++ lib.optionals seccompSupport [ libseccomp ]
-    ++ lib.optionals numaSupport [ numactl ]
-    ++ lib.optionals alsaSupport [ alsa-lib ]
-    ++ lib.optionals pulseSupport [ libpulseaudio ]
-    ++ lib.optionals sdlSupport [ SDL2 SDL2_image ]
-    ++ lib.optionals jackSupport [ libjack2 ]
-    ++ lib.optionals gtkSupport [ gtk3 gettext vte ]
-    ++ lib.optionals vncSupport [ libjpeg libpng ]
-    ++ lib.optionals smartcardSupport [ libcacard ]
-    ++ lib.optionals spiceSupport [ spice-protocol spice ]
-    ++ lib.optionals usbredirSupport [ usbredir ]
-    ++ lib.optionals stdenv.isLinux [ libaio libcap_ng libcap attr ]
-    ++ lib.optionals xenSupport [ xen ]
-    ++ lib.optionals cephSupport [ ceph ]
-    ++ lib.optionals glusterfsSupport [ glusterfs libuuid ]
-    ++ lib.optionals openGLSupport [ mesa libepoxy libdrm ]
-    ++ lib.optionals virglSupport [ virglrenderer ]
-    ++ lib.optionals libiscsiSupport [ libiscsi ]
-    ++ lib.optionals smbdSupport [ samba ]
-    ++ lib.optionals uringSupport [ liburing ];
+  buildInputs =
+    [
+      zlib
+      glib
+      perl
+      pixman
+      vde2
+      texinfo
+      lzo
+      snappy
+      libtasn1
+      gnutls
+      nettle
+      curl
+    ]
+    ++ lib.optionals ncursesSupport [ncurses]
+    ++ lib.optionals seccompSupport [libseccomp]
+    ++ lib.optionals numaSupport [numactl]
+    ++ lib.optionals alsaSupport [alsa-lib]
+    ++ lib.optionals pulseSupport [libpulseaudio]
+    ++ lib.optionals sdlSupport [SDL2 SDL2_image]
+    ++ lib.optionals jackSupport [libjack2]
+    ++ lib.optionals gtkSupport [gtk3 gettext vte]
+    ++ lib.optionals vncSupport [libjpeg libpng]
+    ++ lib.optionals smartcardSupport [libcacard]
+    ++ lib.optionals spiceSupport [spice-protocol spice]
+    ++ lib.optionals usbredirSupport [usbredir]
+    ++ lib.optionals stdenv.isLinux [libaio libcap_ng libcap attr]
+    ++ lib.optionals xenSupport [xen]
+    ++ lib.optionals cephSupport [ceph]
+    ++ lib.optionals glusterfsSupport [glusterfs libuuid]
+    ++ lib.optionals openGLSupport [mesa libepoxy libdrm]
+    ++ lib.optionals virglSupport [virglrenderer]
+    ++ lib.optionals libiscsiSupport [libiscsi]
+    ++ lib.optionals smbdSupport [samba]
+    ++ lib.optionals uringSupport [liburing];
 
   dontUseMesonConfigure = true; # meson's configurePhase isn't compatible with qemu build
 
-  outputs = [ "out" "plugins" ] ++ lib.optional guestAgentSupport "ga";
+  outputs = ["out" "plugins"] ++ lib.optional guestAgentSupport "ga";
   # On aarch64-linux we would shoot over the Hydra's 2G output limit.
   separateDebugInfo = !(stdenv.isAarch64 && stdenv.isLinux);
 
-  patches = [
-    ./fix-qemu-ga.patch
+  patches =
+    [
+      ./fix-qemu-ga.patch
 
-    # QEMU upstream does not demand compatibility to pre-10.13, so 9p-darwin
-    # support on nix requires utimensat fallback. The patch adding this fallback
-    # set was removed during the process of upstreaming this functionality, and
-    # will still be needed in nix until the macOS SDK reaches 10.13+.
-    ./provide-fallback-for-utimensat.patch
-    # Workaround for upstream issue with nested virtualisation: https://gitlab.com/qemu-project/qemu/-/issues/1008
-    (fetchpatch {
-      url = "https://gitlab.com/qemu-project/qemu/-/commit/3e4546d5bd38a1e98d4bd2de48631abf0398a3a2.diff";
-      sha256 = "sha256-oC+bRjEHixv1QEFO9XAm4HHOwoiT+NkhknKGPydnZ5E=";
-      revert = true;
-    })
-  ]
+      # QEMU upstream does not demand compatibility to pre-10.13, so 9p-darwin
+      # support on nix requires utimensat fallback. The patch adding this fallback
+      # set was removed during the process of upstreaming this functionality, and
+      # will still be needed in nix until the macOS SDK reaches 10.13+.
+      ./provide-fallback-for-utimensat.patch
+      # Workaround for upstream issue with nested virtualisation: https://gitlab.com/qemu-project/qemu/-/issues/1008
+      (fetchpatch {
+        url = "https://gitlab.com/qemu-project/qemu/-/commit/3e4546d5bd38a1e98d4bd2de48631abf0398a3a2.diff";
+        sha256 = "sha256-oC+bRjEHixv1QEFO9XAm4HHOwoiT+NkhknKGPydnZ5E=";
+        revert = true;
+      })
+    ]
     ++ lib.optional nixosTestRunner ./force-uid0-on-9p.patch;
 
   postPatch = ''
@@ -143,20 +214,22 @@ stdenv.mkDerivation rec {
       --replace "'VERSION'" "'QEMU_VERSION'"
   '';
 
-  configureFlags = [
-    "--disable-strip" # We'll strip ourselves after separating debug info.
-    "--enable-docs"
-    "--enable-tools"
-    "--enable-plugins"
-    "--localstatedir=/var"
-    "--sysconfdir=/etc"
-    # Always use our Meson, not the bundled version, which doesn't
-    # have our patches and will be subtly broken because of that.
-    "--meson=meson"
-    "--cross-prefix=${stdenv.cc.targetPrefix}"
-    "--cpu=${stdenv.hostPlatform.uname.processor}"
-    (lib.enableFeature guestAgentSupport "guest-agent")
-  ] ++ lib.optional numaSupport "--enable-numa"
+  configureFlags =
+    [
+      "--disable-strip" # We'll strip ourselves after separating debug info.
+      "--enable-docs"
+      "--enable-tools"
+      "--enable-plugins"
+      "--localstatedir=/var"
+      "--sysconfdir=/etc"
+      # Always use our Meson, not the bundled version, which doesn't
+      # have our patches and will be subtly broken because of that.
+      "--meson=meson"
+      "--cross-prefix=${stdenv.cc.targetPrefix}"
+      "--cpu=${stdenv.hostPlatform.uname.processor}"
+      (lib.enableFeature guestAgentSupport "guest-agent")
+    ]
+    ++ lib.optional numaSupport "--enable-numa"
     ++ lib.optional seccompSupport "--enable-seccomp"
     ++ lib.optional smartcardSupport "--enable-smartcard"
     ++ lib.optional spiceSupport "--enable-spice"
@@ -176,21 +249,24 @@ stdenv.mkDerivation rec {
 
   dontWrapGApps = true;
 
-  postFixup = ''
-    # the .desktop is both invalid and pointless
-    rm -f $out/share/applications/qemu.desktop
-  '' + lib.optionalString guestAgentSupport ''
-    # move qemu-ga (guest agent) to separate output
-    mkdir -p $ga/bin
-    mv $out/bin/qemu-ga $ga/bin/
-    ln -s $ga/bin/qemu-ga $out/bin
-    remove-references-to -t $out $ga/bin/qemu-ga
-  '' + lib.optionalString gtkSupport ''
-    # wrap GTK Binaries
-    for f in $out/bin/qemu-system-*; do
-      wrapGApp $f
-    done
-  '';
+  postFixup =
+    ''
+      # the .desktop is both invalid and pointless
+      rm -f $out/share/applications/qemu.desktop
+    ''
+    + lib.optionalString guestAgentSupport ''
+      # move qemu-ga (guest agent) to separate output
+      mkdir -p $ga/bin
+      mv $out/bin/qemu-ga $ga/bin/
+      ln -s $ga/bin/qemu-ga $out/bin
+      remove-references-to -t $out $ga/bin/qemu-ga
+    ''
+    + lib.optionalString gtkSupport ''
+      # wrap GTK Binaries
+      for f in $out/bin/qemu-system-*; do
+        wrapGApp $f
+      done
+    '';
   preBuild = "cd build";
 
   postBuild = ''
@@ -201,7 +277,7 @@ stdenv.mkDerivation rec {
 
   # tests can still timeout on slower systems
   inherit doCheck;
-  checkInputs = [ socat ];
+  checkInputs = [socat];
   preCheck = ''
     # time limits are a little meagre for a build machine that's
     # potentially under load.
@@ -241,7 +317,7 @@ stdenv.mkDerivation rec {
   passthru = {
     qemu-system-i386 = "bin/qemu-system-i386";
     tests = {
-      qemu-tests = qemu.override { doCheck = true; };
+      qemu-tests = qemu.override {doCheck = true;};
     };
   };
 
@@ -250,7 +326,7 @@ stdenv.mkDerivation rec {
     description = "A generic and open source machine emulator and virtualizer";
     license = licenses.gpl2Plus;
     mainProgram = "qemu-kvm";
-    maintainers = with maintainers; [ eelco qyliss ];
+    maintainers = with maintainers; [eelco qyliss];
     platforms = platforms.unix;
     priority = 10; # Prefer virtiofsd from the virtiofsd package.
   };
