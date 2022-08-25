@@ -16,6 +16,7 @@
 #include "snappy-c.h"
 #include "zlib.h"
 #include "zstd.h"
+#include "dce-crypto.h"
 
 #include <openssl/conf.h>
 #include <openssl/evp.h>
@@ -294,110 +295,6 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     free(dest_local);
 }
 
-static int encrypt_aes_xts_256(const uint8_t * plain_text,
-                               uint32_t plain_text_len,
-                               const uint8_t * cipher_key, const uint8_t * iv,
-                               uint8_t * cipher_text)
-{
-    if ((plain_text == NULL) ||
-        (cipher_text == NULL) ||
-        (cipher_key == NULL) ||
-        (plain_text_len == 0)) {
-        return -1;
-    }
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-
-    if (ctx == NULL) {
-        return -2;
-    }
-
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_xts(), NULL,
-            cipher_key, NULL) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -3;
-    }
-    if (EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -4;
-    }
-
-    int encrypted_length = 0;
-
-    if (EVP_EncryptUpdate(ctx, cipher_text, &encrypted_length,
-                          plain_text, plain_text_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -5;
-    }
-
-    if (encrypted_length != plain_text_len) {
-        int final_length = 0;
-        if (EVP_EncryptFinal_ex(ctx, cipher_text + encrypted_length,
-                &final_length) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return -6;
-        }
-        encrypted_length += final_length;
-    }
-
-    EVP_CIPHER_CTX_free(ctx);
-    if (encrypted_length != plain_text_len) {
-        return -7;
-    }
-    return encrypted_length;
-}
-
-static int decrypt_aes_xts_256(const uint8_t * cipher_text, uint32_t
-                               cipher_text_len, const uint8_t * cipher_key,
-                               const uint8_t * iv, uint8_t * plain_text)
-{
-    if ((plain_text == NULL) ||
-        (cipher_text == NULL) ||
-        (cipher_key == NULL) ||
-        (cipher_text_len == 0)) {
-        return -1;
-    }
-
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-
-    if (ctx == NULL) {
-        return -2;
-    }
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_xts(), NULL,
-            cipher_key, NULL) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -3;
-    }
-    if (EVP_DecryptInit_ex(ctx, NULL, NULL, NULL, iv) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -4;
-    }
-
-    int decrypted_length = 0;
-
-    if (EVP_DecryptUpdate(ctx, plain_text, &decrypted_length, cipher_text,
-            cipher_text_len) != 1) {
-        EVP_CIPHER_CTX_free(ctx);
-        return -5;
-    }
-
-    if (decrypted_length != cipher_text_len) {
-        int final_length = 0;
-        if (EVP_EncryptFinal_ex(ctx, plain_text + decrypted_length,
-                &final_length) != 1) {
-            EVP_CIPHER_CTX_free(ctx);
-            return -6;
-        }
-        decrypted_length += final_length;
-    }
-
-    EVP_CIPHER_CTX_free(ctx);
-
-    if (decrypted_length != cipher_text_len) {
-        return -7;
-    }
-    return decrypted_length;
-}
-
 static int dce_crypto(DCEState *state,
                        struct DCEDescriptor *descriptor,
                        unsigned char * src, unsigned char * dest,
@@ -406,8 +303,10 @@ static int dce_crypto(DCEState *state,
 
     /* TODO sanity check the size / alignment */
     // printf("In %s\n", __func__);
-    uint8_t iv[16], key[64];
+    uint8_t iv_xts[16], key[64];
     int err = 0, ret = 0;
+    bool is_SM4, is_GCM;
+    bool decrypt = (is_encrypt == ENCRYPT) ? 0 : 1;
 
     /*
      * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
@@ -417,26 +316,73 @@ static int dce_crypto(DCEState *state,
     uint8_t sec_kid = key_ids[0];
     uint8_t tweak_kid = key_ids[1];
     uint8_t iv_kid = key_ids[2];
+    // FIXME: what does this do?
+    // uint8_t hash_kid = key_ids[3];
+    /*
+     * |  Byte 6 - 7  |   Byte 4 - 5 |
+     * |   AAD side   |   IV size    |
+     */
+    size_t iv_len = extract64(descriptor->operand3, 32, 16);
+    size_t aad_len = extract64(descriptor->operand3, 48, 16);
 
-    /* setup the encryption keys*/
+    /* GCM specific */
+    uint8_t * iv_gcm, * aad;
+    hwaddr iv_dma = descriptor->operand2;
+    hwaddr aad_dma = descriptor->operand4;
+    uint8_t tag[16];
+
+    /* Generic */
     memcpy(key, state->keys[sec_kid], 32);
-    memcpy(key + 32, state->keys[tweak_kid], 32);
 
-    /* setting up IV */
-    memcpy(iv, state->keys[iv_kid], 16);
+    /* Parse operand 0 */
+    is_SM4 = extract16(descriptor->operand0, 0, 1);
+    is_GCM = extract16(descriptor->operand0, 4, 1);
 
-    if (is_encrypt == ENCRYPT) {
-        ret = encrypt_aes_xts_256(src, size, key, iv, dest);
-        if (ret < 0) {
-            printf("ERROR:Encrypt failed!\n");
-            return -1;
+    if (is_GCM) {
+        /* declare local buffers */
+        iv_gcm = calloc(iv_len, 1);
+        aad = calloc(aad_len, 1);
+        /* copy over IV and AAD */
+        /* FIXME: support list for IV, AAD? */
+        local_buffer_tranfer(state, iv_gcm, iv_dma, iv_len,
+                             false, TO_LOCAL);
+        local_buffer_tranfer(state, aad, aad_dma, aad_len,
+                             false, TO_LOCAL);
+        if (is_SM4) {
+            // SM4-GCM
+            printf("Using SM4-GCM\n");
+            ret = dce_sm4_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
+                        src, dest, size, tag);
+        } else {
+            // AES-GCM
+            printf("Using AES-GCM\n");
+            ret = dce_aes_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
+                        src, dest, size, tag);
         }
-    } else {
-        ret = decrypt_aes_xts_256(src, size, key, iv, dest);
-        if (ret < 0) {
-            printf("ERROR:Decrypt failed!\n");
-            return -1;
+        free(iv_gcm);
+        free(aad);
+    }
+    else {
+        /* setup the encryption keys*/
+        memcpy(key + 32, state->keys[tweak_kid], 32);
+         /* setting up IV */
+        memcpy(iv_xts, state->keys[iv_kid], 16);
+        // XTS
+        if (is_SM4) {
+            // SM4-XTS
+            printf("Using SM4-XTS\n");
+            ret = dce_sm4_xts(key, decrypt, iv_xts, src, dest, size);
         }
+        else {
+            // AES-XTS
+            printf("Using AES-XTS\n");
+            ret = dce_aes_xts(key, decrypt, iv_xts, src, dest, size);
+        }
+    }
+
+    if (ret < 0) {
+        printf("ERROR: Encrypt / Decrypt failed!\n");
+        return -1;
     }
     return err;
 }
@@ -545,7 +491,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
             /* TODO: other algorithm */
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, ENCRYPT);
-            if (!err) post_process_size = src_size;
+            if (!err) post_process_size = (src_size + 15) & (~0xf);
             printf("Encrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECRYPT:
@@ -554,6 +500,10 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, src_size, DECRYPT);
             if (!err) post_process_size = src_size;
+            for (int i = post_process_size - 1; i >=0; i--) {
+                if(dest_local[i] == 0) post_process_size--;
+                else break;
+            }
             printf("Decrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_COMPRESS_ENCRYPT:
@@ -564,12 +514,20 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
             printf("Compressed - %ld bytes\n", post_process_size);
             err |= dce_crypto(state, descriptor, (uint8_t *)intermediate,
                        (uint8_t *)dest_local, post_process_size, ENCRYPT);
+            printf("Changing size from %lu ", post_process_size);
+            post_process_size = (post_process_size + 15) & (~0xf);
+            printf("to %lu\n", post_process_size);
             free(intermediate);
             break;
         case DCE_OPCODE_DECRYPT_DECOMPRESS:
             intermediate = calloc(src_size, 1);
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)intermediate, src_size, DECRYPT);
+            for (int i = src_size - 1; i >=0; i--) {
+                if(intermediate[i] == 0) src_size--;
+                else break;
+            }
+            printf("New Src size: %ld\n", src_size);
             err |= dce_compress_decompress(descriptor, intermediate, dest_local,
                                            src_size, &post_process_size,
                                            DECOMPRESS);
@@ -944,7 +902,13 @@ static void dce_realize(PCIDevice *dev, Error **errp)
     if (ret != 0) {
         printf("MSI INIT FAILED\n");
     }
-    pcie_ari_init(dev, 0x100, 1);
+    pcie_ari_init(dev, PCI_CONFIG_SPACE_SIZE, 1);
+
+    /* PASID capability */
+    pcie_add_capability(dev, 0x1b, 1, 0x200, 8);
+    pci_set_long(dev->config + 0x200 + 4, 0x00001400);
+    pci_set_long(dev->wmask + 0x200 + 4,  0xfff0ffff);
+
 
     pcie_sriov_pf_init(dev, 0x160, TYPE_PCI_DCEVF_DEVICE,
                        PCI_DEVICE_ID_RIVOS_DCE_VF, DCE_TOTAL_VFS, DCE_TOTAL_VFS,

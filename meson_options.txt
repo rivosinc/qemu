@@ -163,6 +163,8 @@ option('linux_aio', type : 'feature', value : 'auto',
        description: 'Linux AIO support')
 option('lz4', type : 'feature', value : 'auto',
        description: 'lz4')
+option('dce_crypto', type : 'feature', value : 'auto',
+       description: 'dce_crypto')
 option('openssl', type : 'feature', value : 'auto',
        description: 'openssl')
 option('linux_io_uring', type : 'feature', value : 'auto',
