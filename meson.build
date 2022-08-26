@@ -564,8 +564,7 @@ endif
 
 dce_crypto = not_found
 if not get_option('dce_crypto').auto() or have_block
-  dce_crypto = cc.find_library('dce_crypto',dirs:
-    ['/home/daolu/workspace/dce-crypto/target/debug'], 
+  dce_crypto = cc.find_library('dce_crypto',
                            required: get_option('dce_crypto'),
                            kwargs: static_kwargs)
 endif

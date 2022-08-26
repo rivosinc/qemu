@@ -83,7 +83,9 @@ typedef struct WQMCC_t {
 #define SRC_IS_LIST                 (1 << 1)
 #define SRC2_IS_LIST                (1 << 2)
 #define DEST_IS_LIST                (1 << 3)
+#define PASID_VALID                 (1 << 4)
 
+/* OPCODE VALUES */
 #define DCE_OPCODE_CLFLUSH            0
 #define DCE_OPCODE_MEMCPY             1
 #define DCE_OPCODE_MEMSET             2
@@ -97,13 +99,38 @@ typedef struct WQMCC_t {
 #define DCE_OPCODE_DECRYPT_DECOMPRESS 10
 #define DCE_OPCODE_COMPRESS_ENCRYPT   11
 
-enum {
+#ifdef CONFIG_DCE_CRYPTO
+/* OPERAND 0 for Security/Efficiency */
+/* sec_algo field enum*/
+typedef enum {
+    AES=0,
+    SM4=1,
+} SecAlgo;
+static SecAlgo op0_get_sec_algo(uint16_t op0){
+    return extract16(op0, 0, 1);
+}
+/* sec_func field enum*/
+typedef enum {
+    XTS=0,
+    GCM=1,
+} SecMode;
+static SecMode op0_get_sec_mode(uint16_t op0){
+    return extract16(op0, 4, 1);
+}
+#endif
+
+/* comp_format field enum */
+typedef enum {
     RLE = 0,
     Snappy,
     LZ4,
     GZIP,
     ZSTD
-};
+} CompFormat;
+static CompFormat op0_get_comp_format(uint16_t op0){
+    return extract16(op0, 1, 3);
+}
+
 
 enum {
     TO_LOCAL,
@@ -138,7 +165,7 @@ typedef struct __attribute__((packed)) WQITE {
     uint64_t DSCBA;
     uint8_t  DSCSZ;
     uint64_t DSCPTA;
-    uint32_t Descriptor_transctl;
+    uint32_t TRANSCTL;
     uint64_t WQ_CTX_SAVE_BA;
     // TBA: key slot management
 } __attribute__((packed)) WQITE;
@@ -155,6 +182,12 @@ REG32(DCE_WQCR,     96)
 
 #define WQMCC                       0
 #define GLOB_CONF                   127
+
+
+REG64(DCE_TRANSCTL, 0)
+    FIELD(DCE_TRANSCTL, TRANSCTL_SUPV, 31, 31)
+    FIELD(DCE_TRANSCTL, TRANSCTL_PASID_V, 30, 30)
+    FIELD(DCE_TRANSCTL, TRANSCTL_PASID, 0, 20)
 
 /* WQMCC Page */
 #define DCE_REG_WQITBA                  0x0

@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qemu/log.h"
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
@@ -16,7 +17,9 @@
 #include "snappy-c.h"
 #include "zlib.h"
 #include "zstd.h"
+#ifdef CONFIG_DCE_CRYPTO
 #include "dce-crypto.h"
+#endif
 
 #include <openssl/conf.h>
 #include <openssl/evp.h>
@@ -26,6 +29,7 @@
 
 #define reg_addr(reg) (A_ ## reg)
 #define DCE_AES_KEYLEN    32
+#define DCE_MAC_LEN       16
 #define NUM_WQ            64
 
 #define DCE_CAP_SRIOV_OFFSET 0x160
@@ -34,6 +38,9 @@
 #define DCE_VF_STRIDE 1
 
 #define DCE_DEFAULT_ARB_WEIGHT 0x0101010101010101LLU
+
+#define NUM_KEY_SLOTS 8
+
 typedef struct DCEState
 {
     PCIDevice dev;
@@ -45,13 +52,16 @@ typedef struct DCEState
     bool enable;
     uint64_t dma_mask;
 
-    /* Storage for 8 32B keys */
-	unsigned char keys[8][32];
+    /* Storage for NUM_KEYS 32B keys */
+    unsigned char keys[NUM_KEY_SLOTS][32];
 
     QemuThread core_proc; /* Background processing thread */
     QemuCond core_cond;   /* Background processing wakeup signal */
     QemuMutex core_lock;  /* Global IOMMU lock, used for cache/regs updates */
     unsigned core_exec;   /* Processing thread execution actions */
+
+    /* PASID attrs */
+    bool enable_pasid;
 
     /* only used by VFs */
     struct DCEState * pfstate;
@@ -119,7 +129,7 @@ static uint64_t populate_completion(uint8_t status, uint8_t spec, uint64_t data)
 }
 
 static void complete_workload(DCEState *state, struct DCEDescriptor *descriptor,
-                              int err, uint8_t spec, uint64_t data)
+                              int err, uint8_t spec, uint64_t data, MemTxAttrs * attrs)
 {
     int status = STATUS_PASS;
     uint64_t completion = 0;
@@ -129,21 +139,25 @@ static void complete_workload(DCEState *state, struct DCEDescriptor *descriptor,
         status = STATUS_FAIL;
     }
     completion = populate_completion(status, spec, data);
-    pci_dma_write(&state->dev, descriptor->completion, &completion, 8);
+
+    pci_dma_rw(&state->dev, descriptor->completion,
+        &completion, 8, DMA_DIRECTION_FROM_DEVICE, *attrs);
 }
 
 /* Data processing functions */
 static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
                                   uint64_t * curr_ptr, uint64_t * curr_size,
-                                  bool is_list, size_t size)
+                                  bool is_list, size_t size, MemTxAttrs * attrs)
 {
     int err = 0;
     uint64_t next_level_entry = *entry;
     if (is_list) {
         do {
             *entry = next_level_entry;
-            err |= pci_dma_read(dev, *entry, curr_ptr, 8);
-            err |= pci_dma_read(dev, (*entry) + 8, curr_size, 8);
+            err |= pci_dma_rw(dev, *entry, curr_ptr, 8,
+                        DMA_DIRECTION_TO_DEVICE, *attrs);
+            err |= pci_dma_rw(dev, (*entry) + 8, curr_size, 8,
+                        DMA_DIRECTION_TO_DEVICE, *attrs);
             next_level_entry = *curr_ptr;
         } while((size & (1ULL << 63)) != 0);
     }
@@ -160,21 +174,24 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     }
 }
 
-static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
-                                size_t size,bool is_list, int dir)
-{
+static int local_buffer_transfer(DCEState *state,
+                                uint8_t * local, hwaddr src, size_t size,
+                                bool is_list, int dir, MemTxAttrs * attrs) {
+    /* Initialize attrs for PASID */
+
     int err = 0, bytes_finished = 0;
     uint64_t curr_ptr;
     uint64_t curr_size = 0;
     while(bytes_finished < size) {
         get_next_ptr_and_size(&state->dev, &src, &curr_ptr,
-                              &curr_size, is_list, size);
-        if (dir == TO_LOCAL)
-            err |= pci_dma_read(&state->dev, curr_ptr,
-                                &local[bytes_finished], curr_size);
-        else
-            err |= pci_dma_write(&state->dev, curr_ptr,
-                                 &local[bytes_finished], curr_size);
+                              &curr_size, is_list, size, attrs);
+
+        DMADirection dma_dir = (dir == TO_LOCAL) ? DMA_DIRECTION_TO_DEVICE :
+                                                   DMA_DIRECTION_FROM_DEVICE;
+
+        err |= pci_dma_rw(&state->dev, curr_ptr, &local[bytes_finished],
+            curr_size, dma_dir, *attrs);
+
         if (err) {
             printf("ERROR: %s Addr 0x%lx\n", __func__, curr_ptr);
             break;
@@ -187,30 +204,57 @@ static int local_buffer_tranfer(DCEState *state, uint8_t * local, hwaddr src,
     return err;
 }
 
-static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor)
+static MemTxAttrs initialize_pasid_attrs_transctl(DCEState *state,
+                                uint64_t transctl) {
+    /* setup attr for pasid */
+    MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    uint8_t pasid_valid = FIELD_EX64(transctl, DCE_TRANSCTL, TRANSCTL_PASID_V);
+    if (pasid_valid) {
+        attrs.unspecified = 0;
+        attrs.pasid = FIELD_EX64(transctl, DCE_TRANSCTL, TRANSCTL_PASID);
+        printf("Setting pasid to %d\n", attrs.pasid );
+        attrs.requester_id = pci_requester_id(&state->dev);
+        attrs.secure = 0;
+    }
+    return attrs;
+}
+
+static MemTxAttrs initialize_pasid_attrs(DCEState *state,
+                                struct DCEDescriptor *desc) {
+    /* setup attr for pasid */
+    MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
+    if (desc->ctrl & PASID_VALID) {
+        attrs.unspecified = 0;
+        attrs.pasid = desc->pasid;
+        attrs.requester_id = pci_requester_id(&state->dev);
+        attrs.secure = 0;
+    }
+    return attrs;
+}
+
+static void dce_memcpy(DCEState *state, struct DCEDescriptor *descriptor,
+                        MemTxAttrs * attrs)
 {
     uint64_t size = descriptor->operand1;
     uint8_t * local_buffer = malloc(size);
 
     hwaddr dest = descriptor->dest;
     hwaddr src = descriptor->source;
-    int err = 0;
-
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
-
-    /* copy to local buffer */
-    err |= local_buffer_tranfer(state, local_buffer, src,
-                                size, src_is_list, TO_LOCAL);
+    int err = 0;
+    err |= local_buffer_transfer(state, local_buffer, src,
+                                size, src_is_list, TO_LOCAL, attrs);
     /* copy to dest from local buffer */
-    err |= local_buffer_tranfer(state, local_buffer, dest,
-                                size, dest_is_list, FROM_LOCAL);
+    err |= local_buffer_transfer(state, local_buffer, dest,
+                                size, dest_is_list, FROM_LOCAL, attrs);
 
-    complete_workload(state, descriptor, err, 0, size);
+    complete_workload(state, descriptor, err, 0, size, attrs);
     free(local_buffer);
 }
 
-static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor,
+                            MemTxAttrs * attrs)
 {
     uint64_t pattern1 = descriptor->operand2;
     uint64_t pattern2 = descriptor->operand3;
@@ -235,13 +279,15 @@ static void dce_memset(DCEState *state, struct DCEDescriptor *descriptor)
         local_buffer[i] = *temp;
     }
 
-    err |= local_buffer_tranfer(state, local_buffer, dest, size,
-                                is_list, FROM_LOCAL);
-    complete_workload(state, descriptor, err, 0, size);
+
+    err |= local_buffer_transfer(state, local_buffer, dest, size,
+                                is_list, FROM_LOCAL, attrs);
+    complete_workload(state, descriptor, err, 0, size, attrs);
     free(local_buffer);
 }
 
-static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor,
+                            MemTxAttrs * attrs)
 {
     uint64_t size = descriptor->operand1;
     bool generate_bitmask = descriptor->operand0 & 1;
@@ -263,10 +309,10 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     bool src2_is_list = (descriptor->ctrl & SRC2_IS_LIST) ? true : false;
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
 
-    err |= local_buffer_tranfer(state, src_local, src, size,
-                                src_is_list, TO_LOCAL);
-    err |= local_buffer_tranfer(state, src2_local, src2, size,
-                                src2_is_list, TO_LOCAL);
+    err |= local_buffer_transfer(state, src_local, src,
+                                size, src_is_list, TO_LOCAL, attrs);
+    err |= local_buffer_transfer(state, src2_local, src2,
+                                size, src2_is_list, TO_LOCAL, attrs);
 
     for (int i = 0; i < size; i ++) {
         uint8_t result = src_local[i] ^ src2_local[i];
@@ -282,13 +328,16 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
     }
 
     if (generate_bitmask)
-        err |= local_buffer_tranfer(state, dest_local, dest,
-                                    size, dest_is_list, FROM_LOCAL);
+        err |= local_buffer_transfer(state, dest_local, dest,
+                                size, dest_is_list, FROM_LOCAL, attrs);
+
     else
-        pci_dma_write(&state->dev, descriptor->dest, &diff_found, 8);
+        err |= local_buffer_transfer(state, (uint8_t *)&diff_found, dest,
+                                8, dest_is_list, FROM_LOCAL, attrs);
 
     first_diff_index = diff_found ? (1 << first_diff_index) : 0;
-    complete_workload(state, descriptor, err, 0, first_diff_index);
+    complete_workload(state, descriptor, err, 0, first_diff_index, attrs);
+
 
     free(src_local);
     free(src2_local);
@@ -298,86 +347,115 @@ static void dce_memcmp(DCEState *state, struct DCEDescriptor *descriptor)
 static int dce_crypto(DCEState *state,
                        struct DCEDescriptor *descriptor,
                        unsigned char * src, unsigned char * dest,
-                       uint64_t size, int is_encrypt)
+                       uint64_t size, int is_encrypt, MemTxAttrs * attrs)
 {
-
+#ifdef CONFIG_DCE_CRYPTO
     /* TODO sanity check the size / alignment */
     // printf("In %s\n", __func__);
-    uint8_t iv_xts[16], key[64];
     int err = 0, ret = 0;
-    bool is_SM4, is_GCM;
     bool decrypt = (is_encrypt == ENCRYPT) ? 0 : 1;
 
-    /*
-     * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
-     * | HASH KID | TWEAKIV ID | TWEAK KID | SEC KID |
-     */
     uint8_t * key_ids = (uint8_t *)&descriptor->operand3;
-    uint8_t sec_kid = key_ids[0];
-    uint8_t tweak_kid = key_ids[1];
-    uint8_t iv_kid = key_ids[2];
-    // FIXME: what does this do?
-    // uint8_t hash_kid = key_ids[3];
-    /*
-     * |  Byte 6 - 7  |   Byte 4 - 5 |
-     * |   AAD side   |   IV size    |
-     */
-    size_t iv_len = extract64(descriptor->operand3, 32, 16);
-    size_t aad_len = extract64(descriptor->operand3, 48, 16);
-
-    /* GCM specific */
-    uint8_t * iv_gcm, * aad;
-    hwaddr iv_dma = descriptor->operand2;
-    hwaddr aad_dma = descriptor->operand4;
-    uint8_t tag[16];
-
-    /* Generic */
-    memcpy(key, state->keys[sec_kid], 32);
 
     /* Parse operand 0 */
-    is_SM4 = extract16(descriptor->operand0, 0, 1);
-    is_GCM = extract16(descriptor->operand0, 4, 1);
+    SecAlgo sec_algo = op0_get_sec_algo(descriptor->operand0);
+    SecMode sec_mode = op0_get_sec_mode(descriptor->operand0);
 
-    if (is_GCM) {
+    if (sec_mode==GCM) {
+        uint8_t * iv_gcm, * aad;
+        hwaddr iv_dma = descriptor->operand2;
+        hwaddr aad_dma = descriptor->operand4;
+        uint8_t tag[DCE_MAC_LEN];
+        uint8_t sec_kid = key_ids[0];
+        if(sec_kid >= NUM_KEY_SLOTS){
+            return -129;
+        }
+        /*
+         * |  Byte 6 - 7  |   Byte 4 - 5 |
+         * |   AAD side   |   IV size    |
+         */
+        size_t iv_len = extract64(descriptor->operand3, 32, 16);
+        size_t aad_len = extract64(descriptor->operand3, 48, 16);
         /* declare local buffers */
         iv_gcm = calloc(iv_len, 1);
         aad = calloc(aad_len, 1);
+        if(iv_gcm==NULL || aad ==NULL){
+            err=-128;
+            goto gcm_cleanup;
+        }
         /* copy over IV and AAD */
-        /* FIXME: support list for IV, AAD? */
-        local_buffer_tranfer(state, iv_gcm, iv_dma, iv_len,
-                             false, TO_LOCAL);
-        local_buffer_tranfer(state, aad, aad_dma, aad_len,
-                             false, TO_LOCAL);
-        if (is_SM4) {
+        local_buffer_transfer(state, iv_gcm, iv_dma,
+                                iv_len, false, TO_LOCAL, attrs);
+        local_buffer_transfer(state, aad, aad_dma,
+                                aad_len, false, TO_LOCAL, attrs);
+
+        if (sec_algo == SM4) {
             // SM4-GCM
+            uint8_t key[16]; //16 for SM4
+            memcpy(key, state->keys[sec_kid], 16);
             printf("Using SM4-GCM\n");
             ret = dce_sm4_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
                         src, dest, size, tag);
-        } else {
+        } else if (sec_algo == AES) {
             // AES-GCM
+            uint8_t key[32]; // 32 for AES256
+            memcpy(key, state->keys[sec_kid], 32);
             printf("Using AES-GCM\n");
             ret = dce_aes_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
                         src, dest, size, tag);
+        } else {
+            assert(!"DCE: Unexpected cipher for GCM mode");
+            err = -255;
+            goto gcm_cleanup;
         }
+        if(ret>=0){ /* It worked!
+            Write to completion */
+            pci_dma_rw(&state->dev, ((uintptr_t)descriptor->completion)+8,
+                tag, DCE_MAC_LEN, DMA_DIRECTION_FROM_DEVICE, *attrs);
+        }
+    gcm_cleanup:
         free(iv_gcm);
         free(aad);
     }
-    else {
-        /* setup the encryption keys*/
-        memcpy(key + 32, state->keys[tweak_kid], 32);
-         /* setting up IV */
+    else if(sec_mode==XTS){
+        uint8_t iv_xts[16];
+        /*
+         * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
+         * | HASH KID | TWEAKIV ID | TWEAK KID | SEC KID |
+         */
+        uint8_t sec_kid = key_ids[0];
+        uint8_t tweak_kid = key_ids[1];
+        uint8_t iv_kid = key_ids[2];
+        if(  sec_kid   >= NUM_KEY_SLOTS
+          || tweak_kid >= NUM_KEY_SLOTS
+          || iv_kid    >= NUM_KEY_SLOTS){
+            return -129;
+        }
+        /* setting up IV */
         memcpy(iv_xts, state->keys[iv_kid], 16);
-        // XTS
-        if (is_SM4) {
+
+        if (sec_algo==SM4) {
             // SM4-XTS
             printf("Using SM4-XTS\n");
+            /* setup the encryption keys*/
+            uint8_t key[32];
+            memcpy(key, state->keys[sec_kid], 16);
+            memcpy(key + 16, state->keys[tweak_kid], 16);
+
             ret = dce_sm4_xts(key, decrypt, iv_xts, src, dest, size);
         }
-        else {
+        else if (sec_algo == AES){
             // AES-XTS
             printf("Using AES-XTS\n");
+            /* setup the encryption keys*/
+            uint8_t key[64];
+            memcpy(key, state->keys[sec_kid], 32);
+            memcpy(key + 32, state->keys[tweak_kid], 32);
+
             ret = dce_aes_xts(key, decrypt, iv_xts, src, dest, size);
         }
+    } else {
+        assert(!"DCE: unexpected crypto mode");
     }
 
     if (ret < 0) {
@@ -385,6 +463,10 @@ static int dce_crypto(DCEState *state,
         return -1;
     }
     return err;
+#else
+    qemu_log_mask(LOG_UNIMP, "Crypto not implemented in DCE");
+    return -1;
+#endif
 }
 
 static int dce_compress_decompress(struct DCEDescriptor *descriptor,
@@ -393,7 +475,8 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
 {
     int err = 0;
     /* bit 1-3 in opernad 0 specify the compression format */
-    int comp_format = (descriptor->operand0 >> 1) & 0x7;
+    //int comp_format = (descriptor->operand0 >> 1) & 0x7;
+    int comp_format = op0_get_comp_format(descriptor->operand0);
     switch(comp_format) {
         case RLE:
             break;
@@ -440,15 +523,16 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
     return err;
 }
 
-static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
+                                MemTxAttrs * attrs)
 {
-    uint64_t src_size = descriptor->operand1;
+    uint64_t job_size = descriptor->operand1;
+    uint64_t src_size = job_size;
     uint64_t dest_size;
     size_t post_process_size, err = 0;
     /* create local buffers used for LZ4 */
-    char * src_local = malloc(src_size);
-    char * dest_local;
-    char * intermediate;
+    char * src_local = NULL;
+    char * dest_local = NULL;
 
     hwaddr dest = descriptor->dest;
     hwaddr src = descriptor->source;
@@ -456,21 +540,49 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
     bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
 
-    if (descriptor->opcode == DCE_OPCODE_ENCRYPT ||
-        descriptor->opcode == DCE_OPCODE_DECRYPT) {
+#ifdef CONFIG_DCE_CRYPTO
+    const bool is_enc = descriptor->opcode == DCE_OPCODE_ENCRYPT;
+    const bool is_dec = descriptor->opcode == DCE_OPCODE_DECRYPT;
+    const bool is_crypto = is_enc || is_dec;
+    const SecMode mode =  op0_get_sec_mode(descriptor->operand0);
+
+    if (is_crypto){
         /* crypto, dest size == src size */
-        dest_size = src_size;
+        if(mode == XTS){ //XTS inspired XEX mode
+            //ciphertext is larger than cleartext
+            const size_t ciph_size = (job_size+15)&~0xF;
+            if(is_enc)
+                dest_size = ciph_size;
+            else if(is_dec){
+                src_size = ciph_size;
+                dest_size = job_size;
+            }
+        }
+        else
+            dest_size = src_size;
     }
-    else {
+    else
+#endif
+    {
         /* Compression operations, dest has its own size */
         dest_size = descriptor->operand2;
     }
+
+    /* alloc buffers required for job */
+    /* from now on, exit through cleanup: */
+    src_local  = malloc(src_size);
     dest_local = calloc(dest_size, 1);
     post_process_size = dest_size;
 
+    if(src_local == NULL || dest_local == NULL) {
+        err = -1;
+        goto error;
+    }
+
     /* copy to local buffer */
-    local_buffer_tranfer(state, (uint8_t *)src_local, src, src_size,
-                         src_is_list, TO_LOCAL);
+
+    local_buffer_transfer(state, (uint8_t *)src_local, src,
+                        src_size, src_is_list, TO_LOCAL, attrs);
 
     /* perform compression / decompression */
     switch(descriptor->opcode)
@@ -488,78 +600,51 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor)
             printf("Decompressed - %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_ENCRYPT:
-            /* TODO: other algorithm */
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)dest_local, src_size, ENCRYPT);
-            if (!err) post_process_size = (src_size + 15) & (~0xf);
+                       (uint8_t *)dest_local, job_size, ENCRYPT, attrs);
             printf("Encrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECRYPT:
 
-            /* TODO: other algorithm */
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)dest_local, src_size, DECRYPT);
-            if (!err) post_process_size = src_size;
-            for (int i = post_process_size - 1; i >=0; i--) {
-                if(dest_local[i] == 0) post_process_size--;
-                else break;
-            }
+                       (uint8_t *)dest_local, job_size, DECRYPT, attrs);
             printf("Decrypted %ld bytes\n", post_process_size);
             break;
-        case DCE_OPCODE_COMPRESS_ENCRYPT:
-            intermediate = calloc(dest_size, 1);
-            err |= dce_compress_decompress(descriptor, src_local, intermediate,
-                                           src_size, &post_process_size,
-                                           COMPRESS);
-            printf("Compressed - %ld bytes\n", post_process_size);
-            err |= dce_crypto(state, descriptor, (uint8_t *)intermediate,
-                       (uint8_t *)dest_local, post_process_size, ENCRYPT);
-            printf("Changing size from %lu ", post_process_size);
-            post_process_size = (post_process_size + 15) & (~0xf);
-            printf("to %lu\n", post_process_size);
-            free(intermediate);
-            break;
-        case DCE_OPCODE_DECRYPT_DECOMPRESS:
-            intermediate = calloc(src_size, 1);
-            err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
-                       (uint8_t *)intermediate, src_size, DECRYPT);
-            for (int i = src_size - 1; i >=0; i--) {
-                if(intermediate[i] == 0) src_size--;
-                else break;
-            }
-            printf("New Src size: %ld\n", src_size);
-            err |= dce_compress_decompress(descriptor, intermediate, dest_local,
-                                           src_size, &post_process_size,
-                                           DECOMPRESS);
-            printf("Decompressed - %ld bytes\n", post_process_size);
-            free(intermediate);
-            break;
         default:
+            /* TODO add error code */
             break;
     }
 
     err |= (post_process_size == 0 || post_process_size > dest_size);
     if (err) goto error;
     /* copy back the results */
-    local_buffer_tranfer(state, (uint8_t *)dest_local, dest, post_process_size,
-                         dest_is_list, FROM_LOCAL);
+
+    local_buffer_transfer(state, (uint8_t *)dest_local, dest,
+                        post_process_size, dest_is_list, FROM_LOCAL, attrs);
     goto cleanup;
 
 error:
     printf("ERROR: error has occured, cleaning up!");
 cleanup:
-    complete_workload(state, descriptor, err, 0, post_process_size);
+    complete_workload(state, descriptor, err, 0, post_process_size, attrs);
     free(src_local);
     free(dest_local);
 }
 
-static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor, MemTxAttrs * attrs)
 {
     printf("In %s\n", __func__);
-    unsigned char * key = state->keys[descriptor->dest];
+    uint8_t keyid = descriptor->dest;
+    if(keyid >= NUM_KEY_SLOTS){
+        return;
+    }
+
+    unsigned char * key = state->keys[keyid];
     uint64_t * src = (uint64_t *)descriptor->source;
-    pci_dma_read(&state->dev, (dma_addr_t)src, key, DCE_AES_KEYLEN);
-    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN);
+
+    pci_dma_rw(&state->dev, (dma_addr_t)src, key, DCE_AES_KEYLEN,
+                DMA_DIRECTION_TO_DEVICE, *attrs);
+    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN, attrs);
 }
 
 static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
@@ -567,33 +652,49 @@ static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
     printf("In %s\n", __func__);
     unsigned char * key = state->keys[descriptor->dest];
     memset(key, 0, DCE_AES_KEYLEN);
-    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN);
+    MemTxAttrs attrs = initialize_pasid_attrs(state, descriptor);
+    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN, &attrs);
 }
 
 static void finish_descriptor(DCEState *state, int WQ_id,
-                hwaddr descriptor_address)
+                hwaddr descriptor_address, uint64_t transctl)
 {
     struct DCEDescriptor descriptor;
-    MemTxResult ret = pci_dma_read(&state->dev,
-                                   descriptor_address, &descriptor, 64);
+    MemTxAttrs transctl_attrs = initialize_pasid_attrs_transctl(state, transctl);
+    MemTxResult ret = pci_dma_rw(&state->dev, descriptor_address,
+                &descriptor, 64, DMA_DIRECTION_TO_DEVICE, transctl_attrs);
+
+    MemTxAttrs desc_attrs = initialize_pasid_attrs(state, &descriptor);
+    bool is_priviledged =
+        (FIELD_EX64(transctl, DCE_TRANSCTL ,TRANSCTL_SUPV) == 1);
+    MemTxAttrs * attrs_to_use = is_priviledged ? &desc_attrs : &transctl_attrs;
+
+    printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
+
     if (ret) printf("ERROR: %x\n", ret);
     printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
-        case DCE_OPCODE_MEMCPY:     dce_memcpy(state, &descriptor); break;
-        case DCE_OPCODE_MEMSET:     dce_memset(state, &descriptor); break;
-        case DCE_OPCODE_MEMCMP:     dce_memcmp(state, &descriptor); break;
-        case DCE_OPCODE_COMPRESS:
-        case DCE_OPCODE_DECOMPRESS:
+        case DCE_OPCODE_MEMCPY:
+            dce_memcpy(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_MEMSET:
+            dce_memset(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_MEMCMP:
+            dce_memcmp(state, &descriptor, attrs_to_use); break;
+        // case DCE_OPCODE_COMPRESS:
+        // case DCE_OPCODE_DECOMPRESS:
         case DCE_OPCODE_ENCRYPT:
         case DCE_OPCODE_DECRYPT:
-        case DCE_OPCODE_DECRYPT_DECOMPRESS:
-        case DCE_OPCODE_COMPRESS_ENCRYPT:
-            dce_data_process(state, &descriptor); break;
-        case DCE_OPCODE_LOAD_KEY:   dce_load_key(state, &descriptor); break;
-        case DCE_OPCODE_CLEAR_KEY:  dce_clear_key(state, &descriptor); break;
+        // case DCE_OPCODE_DECRYPT_DECOMPRESS:
+        // case DCE_OPCODE_COMPRESS_ENCRYPT:
+            dce_data_process(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_LOAD_KEY:
+            dce_load_key(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_CLEAR_KEY:
+            dce_clear_key(state, &descriptor); break;
     }
-    if (interrupt_on_completion(state, &descriptor))
+    /* interupt only in priviledged mode */
+    if (interrupt_on_completion(state, &descriptor) && is_priviledged)
         dce_raise_interrupt(state, WQ_id, DCE_INTERRUPT_DESCRIPTOR_COMPLETION);
 }
 
@@ -613,6 +714,8 @@ DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
+    printf("in %s, addr: 0x%lx\n", __func__, addr);
+
     assert(aligned(addr, size));
     // DCEState *state = (DCEState*) opaque;
 
@@ -624,7 +727,7 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                     unsigned size)
 {
-    // printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
+    printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
 
     DCEState *s = (DCEState*) opaque;
 
@@ -734,6 +837,7 @@ static void process_wqs(DCEState * state) {
     uint64_t WQENABLE = ldq_le_p(&state->regs_rw[0][DCE_REG_WQENABLE]);
     // printf("WQITBA: 0x%lx\n", WQITBA);
     WQITE * WQITEs = calloc(1, 0x1000);
+    /* FIXME: use WQMCC.TRANSCTL for this access */
     pci_dma_read(&state->dev, WQITBA, WQITEs, 0x1000);
 
     /* Iterate thru all WQs and see if there is any work to do */
@@ -750,21 +854,25 @@ static void process_wqs(DCEState * state) {
             //     WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
             base = WQITEs[i].DSCBA;
             /* get the head and tail pointer information */
-            pci_dma_read(&state->dev, WQITEs[i].DSCPTA, &head, 8);
-            pci_dma_read(&state->dev, WQITEs[i].DSCPTA + 8, &tail, 8);
-            // printf("base is 0x%lx, head is %lu, tail is %lu\n",
-            //     base, head, tail);
+            // printf("WQITEs[i].TRANSCTL: %d\n", WQITEs[i].TRANSCTL);
+            MemTxAttrs attrs =
+                initialize_pasid_attrs_transctl(state, WQITEs[i].TRANSCTL);
+            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
+                &head, 8, DMA_DIRECTION_TO_DEVICE, attrs);
+            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA + 8,
+                &tail, 8, DMA_DIRECTION_TO_DEVICE, attrs);
             /* keep processing until we catch up */
             while (head < tail) {
                 head_mod = head %= 64;
                 dma_addr_t descriptor_addr = base +
                     (head_mod * sizeof(DCEDescriptor));
-                printf("processing descriptor 0x%lx\n", descriptor_addr);
+                // printf("processing descriptor 0x%lx\n", descriptor_addr);
                 /* Atually process the descriptor */
-                finish_descriptor(state, i, descriptor_addr);
+                finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
             }
-            pci_dma_write(&state->dev, WQITEs[i].DSCPTA, &head, 8);
+            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
+                &head, 8, DMA_DIRECTION_FROM_DEVICE, attrs);
         }
         /* set the WQ back to idle if we finished the job */
         if (head == tail) {
@@ -799,7 +907,6 @@ static void process_notify(DCEState * state, unsigned * exec) {
 }
 
 static void reset_func_weights(DCEState * state) {
-    /* FIXME: check is PF state */
     state->arb_weight_sum = 0;
     uint8_t * temp;
     for (int i = 0; i < 8; i++) {
@@ -975,6 +1082,11 @@ static void dce_instance_init(Object *obj) {}
 static void dce_uninit(PCIDevice *dev) {}
 static void dcevf_uninit(PCIDevice *dev) {}
 
+static Property dce_properties[] = {
+    DEFINE_PROP_BOOL("pasid", DCEState, enable_pasid, TRUE),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void dcevf_class_init(ObjectClass *class, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(class);
@@ -987,6 +1099,7 @@ static void dcevf_class_init(ObjectClass *class, void *data)
 //     k->config_write = dce_config_write;
 
     DeviceClass *dc = DEVICE_CLASS(class);
+    device_class_set_props(dc, dce_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->desc = "DCE Virtual Function";
 }
@@ -1003,6 +1116,7 @@ static void dce_class_init(ObjectClass *class, void *data)
 //     k->config_write = dce_config_write;
 
     DeviceClass *dc = DEVICE_CLASS(class);
+    device_class_set_props(dc, dce_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->desc = "DCE Physical Function";
 }
