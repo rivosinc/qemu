@@ -324,6 +324,7 @@ struct CPUArchState {
     target_ulong mcounteren;
 
     target_ulong mcountinhibit;
+    target_ulong scountersel;
 
     /* PMU counter state */
     PMUCTRState pmu_ctrs[RV_MAX_MHPMCOUNTERS];

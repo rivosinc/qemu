@@ -450,6 +450,27 @@
 #define CSR_MHPMCOUNTER30H  0xb9e
 #define CSR_MHPMCOUNTER31H  0xb9f
 
+/* S/HS-mode Machine Counter-Enable Shadow (Supervisor Counter Delegation) */
+#define CSR_SMCOUNTEREN     0xD00
+/* Supervisor Counter Select Register (Supervisor Counter Delegation) */
+#define CSR_SCOUNTERSEL     0x901
+/* S/HS-mode Supervisor Counter Event Selector (Supervisor Counter Delegation) */
+#define CSR_SHPMEVENT       0x902
+/* S/HS-mode Supervisor Counter Register (Supervisor Counter Delegation) */
+#define CSR_SHPMCOUNTER     0x903
+/* S/HS-mode Supervisor Counter Inhibit Register (Supervisor Counter Delegation) */
+#define CSR_SCOUNTINHIBIT   0x904
+/*
+ * S/HS-mode S/HS-mode Supervisor Event Selector (Supervisor Counter Delegation)
+ * Used to access bits 63:32 on RV32.
+ */
+#define CSR_SHPMEVENTH      0x905
+/*
+ * S/HS-mode S/HS-mode Supervisor Counter Register (Supervisor Counter Delegation)
+ * Used to access bits 63:32 on RV32.
+ */
+#define CSR_SHPMCOUNTERH    0x906
+
 /*
  * User PointerMasking registers
  * NB: actual CSR numbers might be changed in future
@@ -778,10 +799,12 @@ typedef enum RISCVException {
 #define MENVCFG_CBIE                       (3UL << 4)
 #define MENVCFG_CBCFE                      BIT(6)
 #define MENVCFG_CBZE                       BIT(7)
+#define MENVCFG_HPMDE                      (1ULL << 61)
 #define MENVCFG_PBMTE                      (1ULL << 62)
 #define MENVCFG_STCE                       (1ULL << 63)
 
 /* For RV32 */
+#define MENVCFGH_HPMDE                     BIT(29)
 #define MENVCFGH_PBMTE                     BIT(30)
 #define MENVCFGH_STCE                      BIT(31)
 
@@ -909,20 +932,34 @@ typedef enum RISCVException {
 #define MIE_LCOFIE                         (1 << IRQ_PMU_OVF)
 
 #define MHPMEVENT_BIT_OF                   BIT_ULL(63)
+#define SCOUNTERSEL_BIT_AUTO_INC           BIT_ULL(31)
+#define SHPMEVENT_BIT_OF                   BIT_ULL(63)
 #define MHPMEVENTH_BIT_OF                  BIT(31)
+#define SHPMEVENTH_BIT_OF                  BIT(31)
 #define MHPMEVENT_BIT_MINH                 BIT_ULL(62)
 #define MHPMEVENTH_BIT_MINH                BIT(30)
 #define MHPMEVENT_BIT_SINH                 BIT_ULL(61)
 #define MHPMEVENTH_BIT_SINH                BIT(29)
+#define SHPMEVENT_BIT_SINH                 BIT_ULL(61)
+#define SHPMEVENTH_BIT_SINH                BIT(29)
 #define MHPMEVENT_BIT_UINH                 BIT_ULL(60)
 #define MHPMEVENTH_BIT_UINH                BIT(28)
+#define SHPMEVENT_BIT_UINH                 BIT_ULL(60)
+#define SHPMEVENTH_BIT_UINH                BIT(28)
 #define MHPMEVENT_BIT_VSINH                BIT_ULL(59)
 #define MHPMEVENTH_BIT_VSINH               BIT(27)
+#define SHPMEVENT_BIT_VSINH                BIT_ULL(59)
+#define SHPMEVENTH_BIT_VSINH               BIT(27)
 #define MHPMEVENT_BIT_VUINH                BIT_ULL(58)
 #define MHPMEVENTH_BIT_VUINH               BIT(26)
+#define SHPMEVENT_BIT_VUINH                BIT_ULL(58)
+#define SHPMEVENTH_BIT_VUINH               BIT(26)
 
 #define MHPMEVENT_SSCOF_MASK               _ULL(0xFFFF000000000000)
 #define MHPMEVENT_IDX_MASK                 0xFFFFF
 #define MHPMEVENT_SSCOF_RESVD              16
 
+#define SCOUNTERSEL_MASK                   (0x8000001F)
+#define SCOUNTERSEL_CSR_MASK               (0x1F)
+#define SCOUNTERSEL_AUTO_INC_MASK          (0x80000000)
 #endif
