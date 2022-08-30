@@ -179,14 +179,19 @@ static void rv64_base_cpu_init(Object *obj)
 
 static void rv64_rivos_sentinel_cpu_init(Object *obj)
 {
-    CPURISCVState *env = &RISCV_CPU(obj)->env;
+    RISCVCPU *cpu = RISCV_CPU(obj);
+    CPURISCVState *env = &cpu->env;
     set_misa(env, MXL_RV64, RVI | RVM | RVA | RVF | RVD | RVC | RVV |
                             RVH | RVS | RVU);
     set_priv_version(env, PRIV_VERSION_1_12_0);
-    /* For now, allow CPU options to be overridden for Sentinel */
+    set_vext_version(env, VEXT_VERSION_1_00_0);
+    cpu->cfg.vlen = 256;
+    cpu->cfg.elen = 64;
+    cpu->cfg.pa_mask = (1ULL << 46) - 1;
+    cpu->cfg.pmp = false;
+
+    /* Continue supporting command-line CPU customization for now */
     register_cpu_props(DEVICE(obj));
-    qdev_prop_set_bit(DEVICE(obj), "v", true);
-    qdev_prop_set_uint16(DEVICE(obj), "vlen", 256);
 }
 
 static void rv64_sifive_u_cpu_init(Object *obj)
