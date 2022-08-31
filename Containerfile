@@ -15,6 +15,7 @@ RUN apt-get update && \
                            libcurl4-gnutls-dev \
                            libglib2.0-dev \
                            libfdt-dev \
+                           liblua5.3-dev \
                            liblzo2-dev \
                            libpixman-1-dev \
                            libssh2-1-dev \
