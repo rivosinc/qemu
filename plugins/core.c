@@ -161,6 +161,27 @@ static void plugin_cb__udata(enum qemu_plugin_event ev)
     }
 }
 
+/*
+ * Disable CFI checks.
+ * The callback function has been loaded from an external library so we do not
+ * have type information
+ */
+QEMU_DISABLE_CFI
+static void plugin_vcpu_cb__m5op(CPUState *cpu, enum qemu_plugin_event ev, uint32_t m5op_num)
+{
+    struct qemu_plugin_cb *cb, *next;
+
+    if (!test_bit(ev, cpu->plugin_mask)) {
+        return;
+    }
+
+    QLIST_FOREACH_SAFE_RCU(cb, &plugin.cb_lists[ev], entry, next) {
+        qemu_plugin_vcpu_m5op_cb_t func = cb->f.vcpu_m5op;
+
+        func(cb->ctx->id, cpu->cpu_index, m5op_num);
+    }
+}
+
 static void
 do_plugin_register_cb(qemu_plugin_id_t id, enum qemu_plugin_event ev,
                       void *func, void *udata)
@@ -400,6 +421,11 @@ void qemu_plugin_vcpu_resume_cb(CPUState *cpu)
     plugin_vcpu_cb__simple(cpu, QEMU_PLUGIN_EV_VCPU_RESUME);
 }
 
+void qemu_plugin_vcpu_m5op_cb(CPUState *cpu, uint32_t m5op_num)
+{
+    plugin_vcpu_cb__m5op(cpu, QEMU_PLUGIN_EV_VCPU_M5OP, m5op_num);
+}
+
 void qemu_plugin_register_vcpu_idle_cb(qemu_plugin_id_t id,
                                        qemu_plugin_vcpu_simple_cb_t cb)
 {
@@ -410,6 +436,12 @@ void qemu_plugin_register_vcpu_resume_cb(qemu_plugin_id_t id,
                                          qemu_plugin_vcpu_simple_cb_t cb)
 {
     plugin_register_cb(id, QEMU_PLUGIN_EV_VCPU_RESUME, cb);
+}
+
+void qemu_plugin_register_vcpu_m5op_cb(qemu_plugin_id_t id,
+                                       qemu_plugin_vcpu_m5op_cb_t cb)
+{
+    plugin_register_cb(id, QEMU_PLUGIN_EV_VCPU_M5OP, cb);
 }
 
 void qemu_plugin_register_flush_cb(qemu_plugin_id_t id,

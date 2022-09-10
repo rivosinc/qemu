@@ -8,6 +8,10 @@
   inputs = rec {
     rivos-base.url = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/int/rivos-nix.git?dir=base";
     nixpkgs.follows = "rivos-base/nixpkgs-unstable";
+
+    gem5.url = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/gem5.git";
+    gem5.inputs.nixpkgs.follows = "nixpkgs";
+    gem5.inputs.rivos-base.follows = "rivos-base";
   };
 
   nixConfig = {
@@ -18,6 +22,7 @@
   outputs = {
     self,
     nixpkgs,
+    gem5,
     ...
   }: let
     # to work with older version of flakes
@@ -41,7 +46,10 @@
     nixpkgsFor = forAllSystems (system:
       import nixpkgs {
         inherit system;
-        overlays = [self.overlays.default];
+        overlays = [
+          self.overlays.default
+          gem5.overlays.default
+        ];
       });
 
     hostCpuTargets = [

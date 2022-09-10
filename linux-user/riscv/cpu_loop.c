@@ -29,14 +29,25 @@
 #include "user-mmap.h"
 #include "semihosting/common-semi.h"
 
+#ifdef CONFIG_M5
+#include <gem5/m5ops.h>
+#endif
+
 void cpu_loop(CPURISCVState *env)
 {
     CPUState *cs = env_cpu(env);
+    RISCVCPU *riscv_cpu = RISCV_CPU(cs);
     int trapnr;
     target_ulong ret;
     CkptData ckpt;
 
     checkpoint_init(cs, &ckpt);
+
+    /* If m5ops were not enabled, but checkpointing is, then consider the
+       entire process as the region of interest. */
+    if (!riscv_cpu->cfg.ext_XM5Ops) {
+        checkpoint_work_begin(cs, &ckpt);
+    }
 
     for (;;) {
         checkpoint_before_exec(&ckpt);
@@ -94,6 +105,28 @@ void cpu_loop(CPURISCVState *env)
             do_common_semihosting(cs);
             env->pc += 4;
             break;
+#ifdef CONFIG_M5
+        case EXCP_M5OP:
+	    {
+                uint32_t m5op, m5op_num;
+                get_user_u32(m5op, env->pc);
+                m5op_num = (m5op >> 25);
+                if (m5op_num == M5OP_WORK_BEGIN) {
+                    checkpoint_work_begin(cs, &ckpt);
+                } else if (m5op_num == M5OP_WORK_END) {
+                    checkpoint_work_end(cs, &ckpt);
+                } else if (m5op_num == M5OP_CHECKPOINT) {
+                    EXCP_DUMP(env, "\nqemu: m5op checkpoint unimplemented - aborting\n");
+                    exit(EXIT_FAILURE);
+                }
+                qemu_plugin_vcpu_m5op_cb(cs, m5op_num);
+                // HACK: assume any m5op plugin callbacks will require flushing all TBs.
+                tb_flush(cs);
+                qemu_plugin_flush_cb();
+                env->pc += 4;
+                break;
+	    }
+#endif // CONFIG_M5
         default:
             EXCP_DUMP(env, "\nqemu: unhandled CPU exception %#x - aborting\n",
                      trapnr);

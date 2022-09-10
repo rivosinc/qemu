@@ -17,6 +17,7 @@ typedef struct CkptData {
     uint64_t target_inst;
     uint32_t stop_index;
     bool stopping;
+    bool in_workload;
     CPUState *cs;
     int dir;
     FILE *pmem;
@@ -30,6 +31,8 @@ void checkpoint_set_dir(const char *arg);
 void checkpoint_init(CPUState *cs, CkptData *cd);
 void checkpoint_before_exec(CkptData *cd);
 void checkpoint_after_exec(CkptData *cd);
+void checkpoint_work_begin(CPUState *cs, CkptData *cd);
+void checkpoint_work_end(CPUState *cs, CkptData *cd);
 
 #ifdef TARGET_CAN_CHECKPOINT
 extern void target_cpu_checkpoint(CkptData *cd);

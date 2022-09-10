@@ -44,14 +44,22 @@
 #include <fcntl.h>
 #include <zlib.h>
 
+
 #include <qemu-plugin.h>
+
+#include "config-host.h"
+
+#ifdef CONFIG_M5
+#include <gem5/m5ops.h>
+#endif
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
 static char bbv_path[PATH_MAX] = {0};
-static gzFile bbv_file = Z_NULL;
 static char bbvi_path[PATH_MAX] = {0};
+static gzFile bbv_file = Z_NULL;
 static gzFile bbvi_file = Z_NULL;
+static bool m5ops = false;
 
 static GMutex lock;
 static GHashTable *allblocks;
@@ -151,6 +159,9 @@ static void vcpu_syscall_ret(qemu_plugin_id_t id, unsigned int vcpu_idx,
                              int64_t num, int64_t ret)
 {
     if (num != clone_syscall_num || ret != 0) {
+        return;
+    }
+    if (m5ops) {
         return;
     }
     // We are officialy the child process in a fork that's returning.
@@ -258,7 +269,7 @@ static void end_interval(void)
     interval++;
 }
 
-static void plugin_exit(qemu_plugin_id_t id, void *p)
+static void roi_end(void)
 {
     // Flush the partial interval that was in progress when the
     // program exited.
@@ -336,6 +347,16 @@ static void plugin_init(const char* target)
     allblocks = g_hash_table_new(NULL, g_direct_equal);
 }
 
+static void plugin_exit(qemu_plugin_id_t id, void *p)
+{
+    roi_end();
+}
+
+static void roi_begin(void)
+{
+    outfile_init();
+}
+
 static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 {
     BlockInfo *blkinfo = (BlockInfo *) udata;
@@ -410,6 +431,24 @@ static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
                                              &blkinfo->exec_count, blkinfo->insns);
 }
 
+#ifdef CONFIG_M5
+static void handle_m5op(qemu_plugin_id_t id, unsigned int vcpu_index, uint32_t m5op_num)
+{
+    switch (m5op_num) {
+    case M5OP_WORK_BEGIN:
+        qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
+        roi_begin();
+        break;
+    case M5OP_WORK_END:
+        qemu_plugin_register_vcpu_tb_trans_cb(id, NULL);
+        roi_end();
+        break;
+    default:
+        return;
+    }
+}
+#endif
+
 QEMU_PLUGIN_EXPORT
 int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
                         int argc, char **argv)
@@ -433,15 +472,18 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
             intv_length = strtoull(tokens[1], NULL, 0);
         } else if (g_strcmp0(tokens[0], "nblocks") == 0) {
             hot_count = strtoul(tokens[1], NULL, 0);
+        } else if (g_strcmp0(tokens[0], "m5ops") == 0) {
+            if (!qemu_plugin_bool_parse(tokens[0], tokens[1], &m5ops)) {
+                fprintf(stderr, "boolean argument parsing failed: %s\n", opt);
+                return -1;
+            }
         } else {
             fprintf(stderr, "bbvgen: option parsing failed: %s\n", opt);
             return -1;
         }
     }
 
-    outfile_init();
-
-    if (bbv_file == Z_NULL && bbvi_file == Z_NULL) {
+    if (bbv_path == NULL && bbvi_path == NULL) {
         fprintf(stderr, "bbvgen: at least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
         return -1;
     }
@@ -458,7 +500,17 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
     plugin_init(info->target_name);
 
     qemu_plugin_register_vcpu_syscall_ret_cb(id, vcpu_syscall_ret);
-    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
+    if (m5ops) {
+#ifdef CONFIG_M5
+        qemu_plugin_register_vcpu_m5op_cb(id, handle_m5op);
+#else
+        fprintf(stderr, "m5ops requested, but plugin was built without m5ops support\n");
+        exit(EXIT_FAILURE);
+#endif
+    } else {
+        qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
+        roi_begin();
+    }
     return 0;
 }

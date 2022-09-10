@@ -1118,6 +1118,8 @@ static Property riscv_cpu_extensions[] = {
     DEFINE_PROP_BOOL("xventanacondops", RISCVCPU, cfg.ext_XVentanaCondOps, false),
     /* Rivos R-code support */
     DEFINE_PROP_BOOL("rcode", RISCVCPU, cfg.ext_XRivosRcode, false),
+    /* m5ops for gem5-compatible workloads */
+    DEFINE_PROP_BOOL("m5ops", RISCVCPU, cfg.ext_XM5Ops, false),
 
     /* These are experimental so mark with 'x-' */
     DEFINE_PROP_BOOL("x-j", RISCVCPU, cfg.ext_j, false),

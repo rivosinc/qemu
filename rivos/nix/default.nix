@@ -9,6 +9,7 @@
 # Add plugins to a separate output.
 # Remove patches from PR https://github.com/NixOS/nixpkgs/pull/183848
 # Remove big-parallel feature requirement.
+# Added dependency on gem5 for m5ops.
 {
   lib,
   stdenv,
@@ -19,6 +20,7 @@
   zlib,
   pkg-config,
   glib,
+  m5ops,
   buildPackages,
   perl,
   pixman,
@@ -138,6 +140,7 @@ stdenv.mkDerivation rec {
       nettle
       curl
       lua5_3
+      m5ops
     ]
     ++ lib.optionals ncursesSupport [ncurses]
     ++ lib.optionals seccompSupport [libseccomp]

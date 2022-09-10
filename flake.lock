@@ -1,5 +1,28 @@
 {
   "nodes": {
+    "gem5": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "rivos-base": [
+          "rivos-base"
+        ]
+      },
+      "locked": {
+        "lastModified": 1669700864,
+        "narHash": "sha256-6GYYocJwQv1CKTaLk8qcpvAJwgo05fldo2q47qqzU38=",
+        "ref": "refs/heads/cpu-internal-stable",
+        "rev": "a13c8ed69c47938d6ea2c89660b6727aece5823b",
+        "revCount": 18714,
+        "type": "git",
+        "url": "ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/gem5.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@gitlab.ba.rivosinc.com/rv/sw/ext/gem5.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1666867875,
@@ -53,6 +76,7 @@
     },
     "root": {
       "inputs": {
+        "gem5": "gem5",
         "nixpkgs": [
           "rivos-base",
           "nixpkgs-unstable"

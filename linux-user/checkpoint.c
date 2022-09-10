@@ -84,28 +84,25 @@ static void update_for_stop_index(CPUState *cs, CkptData *cd)
         }
         cd->target_inst = target_inst;
         cs->icount_budget = cd->target_inst - cd->total_instructions;
-    } else {
+    } else if (cd->in_workload) {
         // If we're not stopping, we still need a budget of >= 64K
         // because the icount_decr will still be doing its thing for
         // every block.
         // TODO: turn off ICOUNT and clear TB cache?
         cd->target_inst = 0;
         cs->icount_budget = 65536;
+    } else {
+        cs->tcg_cflags &= ~(CF_USE_ICOUNT);
+        tb_flush(cs);
     }
 }
 
-void checkpoint_init(CPUState *cs, CkptData *cd)
-{
-    cd->cs = cs;
-    cd->total_instructions = 0;
-    cd->stop_index = 0;
-
-    update_for_stop_index(cs, cd);
-
+static void checkpoint_setup(CPUState *cs, CkptData *cd) {
 #ifdef TARGET_CAN_CHECKPOINT
     if (cd->stopping) {
         /* RIVOS-KW support the checkpoint flow */
         cs->tcg_cflags = CF_USE_ICOUNT;
+        tb_flush(cs);
     }
 #endif
 
@@ -116,6 +113,26 @@ void checkpoint_init(CPUState *cs, CkptData *cd)
         }
         cd->dir = open(cptdir, O_DIRECTORY);
     }
+}
+
+void checkpoint_init(CPUState *cs, CkptData *cd)
+{
+    cd->cs = cs;
+    cd->total_instructions = 0;
+    cd->stop_index = 0;
+    cd->stopping = false;
+    // TODO: we want this true at startup for some workloads like SPEC.
+    cd->in_workload = false;
+    // Clear the flag in case it was left on by a clone().
+    cs->tcg_cflags &= ~CF_USE_ICOUNT;
+    tb_flush(cs);
+
+    if (!cd->in_workload) {
+        return;
+    }
+    update_for_stop_index(cs, cd);
+
+    checkpoint_setup(cs, cd);
 }
 
 void checkpoint_before_exec(CkptData *cd)
@@ -140,7 +157,7 @@ void checkpoint_after_exec(CkptData *cd)
     // Update the budget based on what got executed "icount_update()"
     //printf("Back to loop %lu %d %ld\n", cs->icount_budget, cpu_neg(cs)->icount_decr.u16.low, cs->icount_extra);
     uint64_t executed = (cs->icount_budget - (cpu_neg(cs)->icount_decr.u16.low + cs->icount_extra));
-    if (executed == 0) {
+    if (executed == 0 && cd->in_workload) {
 #ifdef TARGET_CAN_CHECKPOINT
         checkpoint_emit(cd);
 #endif
@@ -149,8 +166,24 @@ void checkpoint_after_exec(CkptData *cd)
         update_for_stop_index(cs, cd);
     } else {
         cs->icount_budget -= executed;
-        cd->total_instructions += executed;
+        if (cd->in_workload) {
+            cd->total_instructions += executed;
+        }
     }
+}
+
+void checkpoint_work_begin(CPUState *cs, CkptData *cd)
+{
+    cd->in_workload = true;
+    update_for_stop_index(cs, cd);
+
+    checkpoint_setup(cs, cd);
+}
+
+void checkpoint_work_end(CPUState *cs, CkptData *cd)
+{
+    cd->in_workload = false;
+    cd->stopping = false;
 }
 
 #ifdef TARGET_CAN_CHECKPOINT
@@ -277,11 +310,21 @@ static void checkpoint_emit(CkptData *cd)
             if (!strncmp("/proc", buf, 5) || !strncmp("/dev", buf, 4)) {
                 continue;
             }
+            // Skip epoll fds and signalfds.
+            if (!strncmp("anon_inode:[eventpoll]", buf, 22) ||
+                !strncmp("anon_inode:[signalfd]", buf, 21)) {
+                continue;
+            }
+            // Skip pipes and sockets for now.
+            if (!strncmp("pipe:", buf, 5) || !strncmp("socket:", buf, 7)) {
+                continue;
+            }
             // skip the json fd and checkpoint dir fd
             unsigned long tgt_fd = strtoul(dent->d_name, NULL, 10);
             if (tgt_fd == fileno(cd->info) || tgt_fd == cd->dir) {
                 continue;
             }
+            // Regular files.
             int flags = fcntl(tgt_fd, F_GETFL, NULL);
             if (flags == -1) {
                 fprintf(stderr, "ERROR: checkpoint failed to get flags for fd%lu\n", tgt_fd);

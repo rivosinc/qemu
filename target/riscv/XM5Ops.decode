@@ -1,0 +1,53 @@
+#
+# RISC-V translation routines for Gem5 m5ops instructions
+#
+# Copyright (C) 2022 Rivos Inc.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2 or later, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# Formats
+@m5op               ....... ----- ----- --- ----- 1111011
+
+# Instruction patterns
+
+m5_arm              0000000 ..... ..... ... ..... ....... @m5op
+m5_quiesce          0000001 ..... ..... ... ..... ....... @m5op
+m5_quiesce_ns       0000010 ..... ..... ... ..... ....... @m5op
+m5_quiesce_cycle    0000011 ..... ..... ... ..... ....... @m5op
+m5_quiesce_time     0000100 ..... ..... ... ..... ....... @m5op
+m5_rpns             0000111 ..... ..... ... ..... ....... @m5op
+m5_wake_cpu         0001001 ..... ..... ... ..... ....... @m5op
+m5_exit             0100001 ..... ..... ... ..... ....... @m5op
+m5_fail             0100010 ..... ..... ... ..... ....... @m5op
+m5_sum              0100011 ..... ..... ... ..... ....... @m5op
+m5_init_param       0110000 ..... ..... ... ..... ....... @m5op
+m5_load_symbol      0110001 ..... ..... ... ..... ....... @m5op
+m5_reset_stats      1000000 ..... ..... ... ..... ....... @m5op
+m5_dump_stats       1000001 ..... ..... ... ..... ....... @m5op
+m5_dump_reset_stats 1000010 ..... ..... ... ..... ....... @m5op
+m5_checkpoint       1000011 ..... ..... ... ..... ....... @m5op
+m5_write_file       1001111 ..... ..... ... ..... ....... @m5op
+m5_read_file        1010000 ..... ..... ... ..... ....... @m5op
+m5_debug_break      1010001 ..... ..... ... ..... ....... @m5op
+m5_switch_cpu       1010010 ..... ..... ... ..... ....... @m5op
+m5_add_symbol       1010011 ..... ..... ... ..... ....... @m5op
+m5_panic            1010100 ..... ..... ... ..... ....... @m5op
+m5_reserved1        1010101 ..... ..... ... ..... ....... @m5op
+m5_reserved2        1010110 ..... ..... ... ..... ....... @m5op
+m5_reserved3        1010111 ..... ..... ... ..... ....... @m5op
+m5_reserved4        1011000 ..... ..... ... ..... ....... @m5op
+m5_reserved5        1011001 ..... ..... ... ..... ....... @m5op
+m5_work_begin       1011010 ..... ..... ... ..... ....... @m5op
+m5_work_end         1011011 ..... ..... ... ..... ....... @m5op
+m5_dist_toggle_sync 1100010 ..... ..... ... ..... ....... @m5op
+m5_workload         1110000 ..... ..... ... ..... ....... @m5op

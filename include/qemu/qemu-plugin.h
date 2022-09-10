@@ -206,6 +206,23 @@ void qemu_plugin_register_vcpu_idle_cb(qemu_plugin_id_t id,
 void qemu_plugin_register_vcpu_resume_cb(qemu_plugin_id_t id,
                                          qemu_plugin_vcpu_simple_cb_t cb);
 
+/**
+ * typedef qemu_plugin_vcpu_m5op_cb_t - callback with m5op number
+ * @id: the unique qemu_plugin_id_t
+ * @m5op_num: the m5op number
+ */
+typedef void (*qemu_plugin_vcpu_m5op_cb_t)(qemu_plugin_id_t id, unsigned int vcpu_index, uint32_t m5op_num);
+
+/**
+ * qemu_plugin_register_vcpu_m5op_cb() - register a vCPU m5op callback
+ * @id: plugin ID
+ * @cb: callback function
+ *
+ * The @cb function is called when a vCPU encounters an m5op pseudoinstruction.
+ */
+void qemu_plugin_register_vcpu_m5op_cb(qemu_plugin_id_t id,
+                                       qemu_plugin_vcpu_m5op_cb_t cb);
+
 /** struct qemu_plugin_tb - Opaque handle for a translation block */
 struct qemu_plugin_tb;
 /** struct qemu_plugin_insn - Opaque handle for a translated instruction */
