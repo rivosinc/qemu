@@ -7,6 +7,9 @@ config IBEX
 config RISCV_IOMMU
     bool
 
+config RIVOS_DOE
+    bool
+
 config MICROCHIP_PFSOC
     bool
     select CADENCE_SDHCI
