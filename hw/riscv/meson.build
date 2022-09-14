@@ -11,5 +11,6 @@ riscv_ss.add(when: 'CONFIG_SPIKE', if_true: files('spike.c'))
 riscv_ss.add(when: 'CONFIG_MICROCHIP_PFSOC', if_true: files('microchip_pfsoc.c'))
 riscv_ss.add(when: 'CONFIG_RISCV_IOMMU', if_true: files('riscv_iommu.c'))
 riscv_ss.add(when: 'CONFIG_RIVOS_DOE', if_true: files('rivos-doe.c'))
+riscv_ss.add(when: 'CONFIG_RIVOS_ROTIF', if_true: files('rivos-rotif.c'))
 
 hw_arch += {'riscv': riscv_ss}

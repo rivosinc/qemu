@@ -10,6 +10,10 @@ config RISCV_IOMMU
 config RIVOS_DOE
     bool
 
+config RIVOS_ROTIF
+    bool
+    select RIVOS_DOE
+
 config MICROCHIP_PFSOC
     bool
     select CADENCE_SDHCI
