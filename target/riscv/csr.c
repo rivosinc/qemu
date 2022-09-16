@@ -169,6 +169,39 @@ static RISCVException sscofpmf(CPURISCVState *env, int csrno)
     return RISCV_EXCP_NONE;
 }
 
+static RISCVException sscdeleg(CPURISCVState *env, int csrno)
+{
+    CPUState *cs = env_cpu(env);
+    RISCVCPU *cpu = RISCV_CPU(cs);
+
+    /*
+     * No need of separate function for rv32 as menvcfg stores both menvcfg
+     * menvcfgh for RV32.
+     */
+    if (!cpu->cfg.ext_sscdeleg) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (((csrno != CSR_SMCOUNTEREN) && ((csrno < CSR_SCOUNTERSEL) || (csrno > CSR_SHPMCOUNTERH)))) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (((env->priv != PRV_M) && (env->priv != PRV_S))) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException sscdeleg32(CPURISCVState *env, int csrno)
+{
+    if (riscv_cpu_mxl(env) != MXL_RV32) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    return sscdeleg(env, csrno);
+}
+
 static RISCVException any(CPURISCVState *env, int csrno)
 {
     return RISCV_EXCP_NONE;
@@ -2019,14 +2052,45 @@ static RISCVException read_menvcfg(CPURISCVState *env, int csrno,
     return RISCV_EXCP_NONE;
 }
 
+static bool is_hpmde_enabled(CPURISCVState *env) {
+    if (riscv_cpu_mxl(env) != MXL_RV32) {
+        return get_field(env->menvcfg, MENVCFG_HPMDE) == 1;
+    } else {
+        return get_field(env->menvcfg, MENVCFGH_HPMDE) == 1;
+    }
+}
+
+static bool is_delegated_smode_counter(CPURISCVState *env,
+                                       int csr_index)
+{
+    target_ulong val = 0;
+
+    if (is_hpmde_enabled(env)) {
+        read_mcounteren(env, CSR_MCOUNTEREN, &val);
+        return (val & (1 << csr_index)) != 0;
+    }
+
+    return false;
+}
+
 static RISCVException write_menvcfg(CPURISCVState *env, int csrno,
                                   target_ulong val)
 {
     uint64_t mask = MENVCFG_FIOM | MENVCFG_CBIE | MENVCFG_CBCFE | MENVCFG_CBZE;
+    CPUState *cs = env_cpu(env);
+    RISCVCPU *cpu = RISCV_CPU(cs);
 
     if (riscv_cpu_mxl(env) == MXL_RV64) {
         mask |= MENVCFG_PBMTE | MENVCFG_STCE;
+        if (cpu->cfg.ext_sscdeleg) {
+            mask |= MENVCFG_HPMDE;
+        }
+    } else {
+        if (cpu->cfg.ext_sscdeleg) {
+            mask |= MENVCFGH_HPMDE;
+        }
     }
+
     env->menvcfg = (env->menvcfg & ~mask) | (val & mask);
 
     return RISCV_EXCP_NONE;
@@ -2044,6 +2108,12 @@ static RISCVException write_menvcfgh(CPURISCVState *env, int csrno,
 {
     uint64_t mask = MENVCFG_PBMTE | MENVCFG_STCE;
     uint64_t valh = (uint64_t)val << 32;
+    CPUState *cs = env_cpu(env);
+    RISCVCPU *cpu = RISCV_CPU(cs);
+
+    if (cpu->cfg.ext_sscdeleg) {
+        mask |= MENVCFG_HPMDE;
+    }
 
     env->menvcfg = (env->menvcfg & ~mask) | (valh & mask);
 
@@ -3895,6 +3965,329 @@ RISCVException riscv_csrrw_debug(CPURISCVState *env, int csrno,
     return ret;
 }
 
+static RISCVException read_smcounteren(CPURISCVState *env,
+                                       int csrno,
+                                       target_ulong *val)
+{
+    int ret = read_mcounteren(env, CSR_MCOUNTEREN, val);
+
+    if (ret == RISCV_EXCP_NONE) {
+        if (!is_hpmde_enabled(env)) {
+            *val = 0;
+        }
+    }
+
+    return ret;
+}
+
+static RISCVException read_scountersel(CPURISCVState *env,
+                                       int csrno,
+                                       target_ulong *val)
+{
+    if (!is_hpmde_enabled(env)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    *val = env->scountersel;
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException write_scountersel(CPURISCVState *env,
+                                        int csrno,
+                                        target_ulong val)
+{
+    if (!is_hpmde_enabled(env)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    env->scountersel = (val & SCOUNTERSEL_MASK);
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException read_scountinhibit(CPURISCVState *env,
+                                         int csrno,
+                                         target_ulong *val)
+{
+    target_ulong scounter_en_val = 0;
+    int ret = read_smcounteren(env, CSR_SCOUNTEREN, &scounter_en_val);
+
+    if (ret != RISCV_EXCP_NONE) {
+        return ret;
+    }
+
+    if (!is_hpmde_enabled(env)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    ret = read_mcountinhibit(env, CSR_MCOUNTINHIBIT, val);
+    *val &= scounter_en_val;
+    return ret;
+}
+
+static RISCVException write_scountinhibit(CPURISCVState *env,
+                                           int csrno,
+                                           target_ulong val)
+{
+    target_ulong current_val = 0;
+    int ret = read_smcounteren(env, CSR_SCOUNTEREN, &current_val);
+
+    if (ret != RISCV_EXCP_NONE) {
+        return ret;
+    }
+
+    if (!is_hpmde_enabled(env)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    val &= current_val;
+    ret = read_mcountinhibit(env, CSR_MCOUNTINHIBIT, &current_val);
+
+    if (ret != RISCV_EXCP_NONE) {
+        return ret;
+    }
+
+    return write_mcountinhibit(env, csrno, val | current_val);
+}
+
+static void handle_auto_increment(CPURISCVState *env)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    if ((env->scountersel & SCOUNTERSEL_AUTO_INC_MASK) != 0) {
+        csr_index += 1;
+        csr_index %= 32;
+        env->scountersel |= csr_index;
+    }
+}
+
+static RISCVException read_shpmevent(CPURISCVState *env,
+                                     int csrno,
+                                     target_ulong *val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        *val = 0;
+        handle_auto_increment(env);
+        return RISCV_EXCP_NONE;
+    }
+
+    csr_index -= 3;
+    ret = read_mhpmevent(env, CSR_MHPMEVENT3 + csr_index, val);
+
+    if (ret == RISCV_EXCP_NONE) {
+        *val &= ~MHPMEVENT_BIT_MINH;
+    }
+
+    return ret;
+}
+
+static RISCVException write_shpmevent(CPURISCVState *env,
+                                      int csrno,
+                                      target_ulong val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    target_ulong current_val = 0;
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        return RISCV_EXCP_NONE;
+    }
+
+    csr_index -= 3;
+    ret = read_mhpmevent(env, CSR_MHPMEVENT3 + csr_index, &current_val);
+    val &= ~MHPMEVENT_BIT_MINH;
+    val |= (current_val & MHPMEVENT_BIT_MINH);
+
+    if (ret != RISCV_EXCP_NONE) {
+        return ret;
+    }
+
+    return write_mhpmevent(env, CSR_MHPMEVENT3 + csr_index, val);
+}
+
+static RISCVException read_shpmcounter(CPURISCVState *env,
+                                       int csrno,
+                                       target_ulong *val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        if (csr_index == 0) {
+            ret = read_hpmcounter(env, CSR_MCYCLE, val);
+        } else if (csr_index == 1) {
+            ret = read_time(env, CSR_TIME, val);
+        } else {
+            ret = read_hpmcounter(env, CSR_MINSTRET, val);
+        }
+    } else {
+        csr_index -= 3;
+        ret = read_hpmcounter(env, CSR_MHPMCOUNTER3 + csr_index, val);
+    }
+
+    if (ret == RISCV_EXCP_NONE) {
+        handle_auto_increment(env);
+    }
+
+    return ret;
+}
+
+static RISCVException write_shmpmcounter(CPURISCVState *env,
+                                         int csrno,
+                                         target_ulong val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        if (csr_index == 0) {
+            ret = write_mhpmcounter(env, CSR_MCYCLE, val);
+        } else if (csr_index == 1) {
+            /* Ignore writes to CSR_TIME */
+        } else {
+            ret = write_mhpmcounter(env, CSR_MINSTRET, val);
+        }
+    } else {
+        csr_index -= 3;
+        ret = write_mhpmcounter(env, CSR_MHPMCOUNTER3 + csr_index, val);
+    }
+
+    if (ret == RISCV_EXCP_NONE) {
+        handle_auto_increment(env);
+    }
+
+    return ret;
+}
+
+static RISCVException read_shpmeventh(CPURISCVState *env,
+                                      int csrno,
+                                      target_ulong *val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        return RISCV_EXCP_NONE;
+    }
+
+    csr_index -= 3;
+    ret = read_mhpmeventh(env, CSR_MHPMEVENT3H + csr_index, val);
+
+    if (ret == RISCV_EXCP_NONE) {
+        *val &= ~MHPMEVENTH_BIT_MINH;
+    }
+
+    return ret;
+}
+
+static RISCVException write_shpmeventh(CPURISCVState *env,
+                                       int csrno,
+                                       target_ulong val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    target_ulong current_val = 0;
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        return RISCV_EXCP_NONE;
+    }
+
+    csr_index -= 3;
+    ret = read_mhpmeventh(env, CSR_MHPMEVENT3H + csr_index, &current_val);
+
+    if (ret != RISCV_EXCP_NONE) {
+        return ret;
+    }
+
+    current_val &= MHPMEVENTH_BIT_MINH;
+    current_val |= (val & ~MHPMEVENTH_BIT_MINH);
+
+    return write_mhpmeventh(env, CSR_MHPMEVENT3H + csr_index, current_val);
+}
+
+static RISCVException read_shpmcounterh(CPURISCVState *env,
+                                        int csrno,
+                                        target_ulong *val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        *val = 0;
+        handle_auto_increment(env);
+        return RISCV_EXCP_NONE;
+    }
+
+    csr_index -= 3;
+    ret = read_hpmcounterh(env, CSR_MHPMCOUNTER3H + csr_index, val);
+
+    if (ret == RISCV_EXCP_NONE) {
+        handle_auto_increment(env);
+    }
+
+    return ret;
+}
+
+static RISCVException write_shpmcounterh(CPURISCVState *env,
+                                         int csrno,
+                                         target_ulong val)
+{
+    int csr_index = (env->scountersel & SCOUNTERSEL_CSR_MASK);
+    RISCVException ret = RISCV_EXCP_NONE;
+
+    if (!is_delegated_smode_counter(env, csr_index)) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    if (csr_index <= 2) {
+        if (csr_index == 0) {
+            ret = write_mhpmcounter(env, CSR_MCYCLEH, val);
+        } else if (csr_index == 1) {
+            /* Ignore free to CSR_TIME */
+        } else {
+            ret = write_mhpmcounter(env, CSR_MINSTRETH, val);
+        }
+    } else {
+        csr_index -= 3;
+        ret = write_mhpmcounter(env, CSR_MHPMCOUNTER3H + csr_index, val);
+    }
+
+    if (ret == RISCV_EXCP_NONE) {
+        handle_auto_increment(env);
+    }
+
+    return ret;
+}
+
 /* Control and Status Register function table */
 riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
     /* User Floating-Point CSRs */
@@ -4538,6 +4931,25 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
                              write_mhpmcounterh                         },
     [CSR_SCOUNTOVF]      = { "scountovf", sscofpmf,  read_scountovf,
                              .min_priv_ver = PRIV_VERSION_1_12_0 },
-
-#endif /* !CONFIG_USER_ONLY */
+    [CSR_SMCOUNTEREN]    = { "smcounteren", sscdeleg, read_smcounteren,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SCOUNTERSEL]    = { "scountersel", sscdeleg, read_scountersel,
+                             write_scountersel,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SHPMEVENT]      = { "shpmevent", sscdeleg, read_shpmevent,
+                             write_shpmevent,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SHPMCOUNTER]    = { "shpmcounter", sscdeleg, read_shpmcounter,
+                             write_shmpmcounter,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SCOUNTINHIBIT]  = { "scountinhibit", sscdeleg, read_scountinhibit,
+                             write_scountinhibit,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SHPMEVENTH]     = { "shpmeventh", sscdeleg32, read_shpmeventh,
+                             write_shpmeventh,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    [CSR_SHPMCOUNTERH]   = { "shpmeventh", sscdeleg32, read_shpmcounterh,
+                             write_shpmcounterh,
+                             .min_priv_ver = PRIV_VERSION_1_12_0 },
+    #endif /* !CONFIG_USER_ONLY */
 };
