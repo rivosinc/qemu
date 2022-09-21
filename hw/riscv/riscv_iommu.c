@@ -52,6 +52,7 @@ struct RISCVIOMMUState {
     uint64_t cap;         /* IOMMU supported capabitilites */
 
     bool enable_off;      /* Enable out-of-reset OFF mode (DMA disabled) */
+    bool enable_msi;      /* Enable MSI remapping */
     bool enable_ats;      /* Enable ATS support */
     bool enable_s_stage;  /* Enable S/VS-Stage translation */
     bool enable_g_stage;  /* Enable G-Stage translation */
@@ -75,6 +76,8 @@ struct RISCVIOMMUState {
     /* interrupt delivery callback */
     void (*notify)(RISCVIOMMUState *iommu, unsigned vector);
 
+    AddressSpace trap_as;           /* MRIF/MSI access trap address space */
+    MemoryRegion trap_mr;           /* MRIF/MSI access trap memory region */
     MemoryRegion regs_mr;           /* MMIO interface */
     QemuSpin regs_lock;             /* MMIO register lock */
 
@@ -103,6 +106,9 @@ struct RISCVIOMMUContext {
     uint64_t ta;                /* Translation Attributes */
     uint64_t satp;              /* S-Stage address translation and protection */
     uint64_t gatp;              /* G-Stage address translation and protection */
+    uint64_t msi_addr_mask;     /* MSI filtering - address mask */
+    uint64_t msi_addr_pattern;  /* MSI filtering - address pattern */
+    uint64_t msi_redirect;      /* MSI redirection page table pointer */
 };
 
 /* Register helper functions */
@@ -389,6 +395,133 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
                 (pass ? RIO_CAUSE_RD_FAULT_G : RIO_CAUSE_RD_FAULT_S);
 }
 
+/* Portable implementation of pext_u64, bit-mask extraction. */
+static uint64_t _pext_u64(uint64_t val, uint64_t ext)
+{
+    uint64_t ret = 0;
+    uint64_t rot = 1;
+
+    while (ext) {
+        if (ext & 1) {
+            if (val & 1) {
+                ret |= rot;
+            }
+            rot <<= 1;
+        }
+        val >>= 1;
+        ext >>= 1;
+    }
+
+    return ret;
+}
+
+/* Check if IOVA matches MSI/MRIF pattern. */
+static bool riscv_iommu_msi_check(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
+        dma_addr_t iova)
+{
+    if (get_field(ctx->msi_redirect, RIO_DCMSI_MASK_MODE) !=
+        RIO_DCMSI_MODE_FLAT) {
+        return false; /* Invalid MSI/MRIF mode */
+    }
+
+    if ((PPN_DOWN(iova) ^ ctx->msi_addr_pattern) & ~ctx->msi_addr_mask) {
+        return false; /* IOVA not in MSI range defined by AIA IMSIC rules. */
+    }
+
+    return true;
+}
+
+/* Redirect MSI write for given IOVA. */
+static MemTxResult riscv_iommu_msi_write(RISCVIOMMUState *s,
+        RISCVIOMMUContext *ctx, uint64_t iova, uint64_t data,
+        unsigned size, MemTxAttrs attrs)
+{
+    MemTxResult res;
+    dma_addr_t addr;
+    uint64_t intn;
+    uint32_t n190;
+    uint64_t pte[2];
+
+    if (!riscv_iommu_msi_check(s, ctx, iova)) {
+        return MEMTX_ACCESS_ERROR;
+    }
+
+    /* Interrupt File Number */
+    intn = _pext_u64(PPN_DOWN(iova), ctx->msi_addr_mask);
+    if (intn >= 256) {
+        /* Interrupt file number out of range */
+        return MEMTX_ACCESS_ERROR;
+    }
+
+    /* fetch MSI PTE */
+    addr = PPN_PHYS(get_field(ctx->msi_redirect, RIO_DCMSI_MASK_PPN));
+    addr = addr | (intn * sizeof(pte));
+    res = dma_memory_read(s->target_as, addr, &pte, sizeof(pte),
+            MEMTXATTRS_UNSPECIFIED);
+    if (res != MEMTX_OK) {
+        return res;
+    }
+
+    le64_to_cpus(&pte[0]);
+    le64_to_cpus(&pte[1]);
+
+    if (!(pte[0] & RIO_MSIPTE_V) || (pte[0] & RIO_MSIPTE_C)) {
+        return MEMTX_ACCESS_ERROR;
+    }
+
+    if (pte[0] & RIO_MSIPTE_W) {
+        /* MSI Pass-through mode */
+        addr = PPN_PHYS(get_field(pte[0], RIO_MSIPTE_MASK_PPN));
+        addr = addr | (iova & TARGET_PAGE_MASK);
+        return dma_memory_write(s->target_as, addr, &data, size, attrs);
+    }
+
+    if ((data & ~0x7FF) || (iova & 0x07FF)) {
+        /* Invalid interrupt number */
+        return MEMTX_ACCESS_ERROR;
+    }
+
+    /* MSI MRIF mode, non atomic pending bit update */
+
+    /* MRIF pending bit address */
+    addr = get_field(pte[0], RIO_MRIF_ADDR_MASK_PPN) << 9;
+    addr = addr | ((data & 0x7c0) >> 3);
+    /* MRIF pending bit mask */
+    data = 1ULL << (data & 0x03f);
+    res = dma_memory_read(s->target_as, addr, &intn, sizeof(intn), attrs);
+    if (res != MEMTX_OK) {
+        return res;
+    }
+    intn = intn | data;
+    res = dma_memory_write(s->target_as, addr, &intn, sizeof(intn), attrs);
+    if (res != MEMTX_OK) {
+        return res;
+    }
+
+    /* Get MRIF enable bits */
+    addr = addr + sizeof(intn);
+    res = dma_memory_read(s->target_as, addr, &intn, sizeof(intn), attrs);
+    if (res != MEMTX_OK) {
+        return res;
+    }
+    if (!(intn & data)) {
+        /* notification disabled, MRIF update completed. */
+        return MEMTX_OK;
+    }
+
+    /* Send notification message */
+    addr = PPN_PHYS(get_field(pte[1], RIO_MRIF_NPPN_MASK_PPN));
+    n190 = get_field(pte[1], RIO_MRIF_NPPN_MASK_N90) |
+          (get_field(pte[1], RIO_MRIF_NPPN_MASK_N10) << 10);
+
+    res = dma_memory_write(s->target_as, addr, &n190, sizeof(n190), attrs);
+    if (res != MEMTX_OK) {
+        return res;
+    }
+
+    return MEMTX_OK;
+}
+
 /*
  * RISC-V IOMMU Device Context Loopkup - Device Directory Tree Walk
  *
@@ -401,7 +534,7 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     const uint64_t ddtp = s->ddtp;
     unsigned mode = get_field(ddtp, RIO_DDTP_MASK_MODE);
     dma_addr_t addr = PPN_PHYS(get_field(ddtp, RIO_DDTP_MASK_PPN));
-    const bool dcbase = true; /* DC format mode: 1: BASE | 0: EXTENDED */
+    const bool dcbase = !s->enable_msi; /* DC format mode: 1: BASE | 0: EXT */
     unsigned depth;
     uint64_t de;
     RISCVIOMMUDeviceContext dc;
@@ -416,6 +549,7 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
         ctx->satp = set_field(0, RIO_ATP_MASK_MODE, RIO_ATP_MODE_BARE);
         ctx->tc = RIO_DCTC_EN_ATS | RIO_DCTC_VALID;
         ctx->ta = 0;
+        ctx->msi_redirect = 0;
         return 0;
 
     case RIO_DDTP_MODE_1LVL:
@@ -472,6 +606,9 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     ctx->gatp = le64_to_cpu(dc.gatp);
     ctx->satp = le64_to_cpu(dc.fsc);
     ctx->ta = le64_to_cpu(dc.ta);
+    ctx->msi_redirect = le64_to_cpu(dc.msiptp);
+    ctx->msi_addr_mask = le64_to_cpu(dc.msi_addr_mask);
+    ctx->msi_addr_pattern = le64_to_cpu(dc.msi_addr_pattern);
 
     if (!(ctx->tc & RIO_DCTC_VALID)) {
         return RIO_CAUSE_DDT_INVALID;
@@ -588,6 +725,15 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
 {
     bool enable_faults = true;
     int fault;
+
+    if ((iotlb->perm & IOMMU_WO) &&
+            riscv_iommu_msi_check(s, ctx, iotlb->iova)) {
+        /* Trap MSI writes and return untranslated address. */
+        iotlb->target_as = &s->trap_as;
+        iotlb->translated_addr = iotlb->iova;
+        iotlb->addr_mask = ~TARGET_PAGE_MASK;
+        return 0;
+    }
 
     enable_faults = !(ctx->tc & RIO_DCTC_DTF);
 
@@ -1065,9 +1211,56 @@ static const MemoryRegionOps riscv_iommu_mmio_ops = {
     }
 };
 
+static MemTxResult riscv_iommu_trap_write(void *opaque, hwaddr addr,
+        uint64_t data, unsigned size, MemTxAttrs attrs)
+{
+    RISCVIOMMUState* s = (RISCVIOMMUState *)opaque;
+    RISCVIOMMUContext *ctx;
+    MemTxResult res;
+    void *ref;
+    uint32_t devid = attrs.requester_id;
+
+    if (attrs.unspecified) {
+        return MEMTX_ACCESS_ERROR;
+    }
+
+    ctx = riscv_iommu_ctx(s, devid, &ref);
+    if (ctx == NULL) {
+        res = MEMTX_ACCESS_ERROR;
+    } else {
+        res = riscv_iommu_msi_write(s, ctx, addr, data, size, attrs);
+    }
+    riscv_iommu_ctx_put(s, ref);
+    return res;
+}
+
+static MemTxResult riscv_iommu_trap_read(void *opaque, hwaddr addr,
+        uint64_t *data, unsigned size, MemTxAttrs attrs)
+{
+    return MEMTX_ACCESS_ERROR;
+}
+
+static const MemoryRegionOps riscv_iommu_trap_ops = {
+    .read_with_attrs = riscv_iommu_trap_read,
+    .write_with_attrs = riscv_iommu_trap_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
+    .valid = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+    }
+};
+
 static void riscv_iommu_init(RISCVIOMMUState *s)
 {
     s->cap = s->version & RIO_CAP_REV_MASK;
+    if (s->enable_msi) {
+        s->cap |= RIO_CAP_MSI_FLAT | RIO_CAP_MSI_MRIF;
+    }
     if (s->enable_ats) {
         s->cap |= RIO_CAP_ATS;
     }
@@ -1119,6 +1312,11 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
         stq_le_p(&s->regs_ro[RIO_REG_TR_REQ_IOVA], 0);
         stq_le_p(&s->regs_ro[RIO_REG_TR_REQ_CTRL], RIO_TRREQ_BUSY);
     }
+
+    /* Memory region for untranslated MRIF/MSI writes */
+    memory_region_init_io(&s->trap_mr, NULL, &riscv_iommu_trap_ops, s,
+            "riscv-iommu-trap", ~0ULL);
+    address_space_init(&s->trap_as, &s->trap_mr, "riscv-iommu-trap-as");
 
     s->iommus.le_next = NULL;
     s->iommus.le_prev = NULL;
@@ -1271,6 +1469,7 @@ static const VMStateDescription riscv_iommu_vmstate = {
 
 static Property riscv_iommu_properties[] = {
     DEFINE_PROP_UINT32("version", RISCVIOMMUStatePci, iommu.version, 0x02),
+    DEFINE_PROP_BOOL("ir", RISCVIOMMUStatePci, iommu.enable_msi, TRUE),
     DEFINE_PROP_BOOL("ats", RISCVIOMMUStatePci, iommu.enable_ats, TRUE),
     DEFINE_PROP_BOOL("off", RISCVIOMMUStatePci, iommu.enable_off, TRUE),
     DEFINE_PROP_BOOL("s-stage", RISCVIOMMUStatePci, iommu.enable_s_stage, TRUE),
