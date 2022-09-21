@@ -38,6 +38,8 @@
 #define PCI_DEVICE_ID_RIVOS_IOMMU     0xedf1
 #endif
 
+#define LIMIT_CACHE_CTX               (1U << 7)
+
 /* Physical page number coversions */
 #define PPN_PHYS(ppn)                 ((ppn) << TARGET_PAGE_BITS)
 #define PPN_DOWN(phy)                 ((phy) >> TARGET_PAGE_BITS)
@@ -76,6 +78,8 @@ struct RISCVIOMMUState {
 
     /* interrupt delivery callback */
     void (*notify)(RISCVIOMMUState *iommu, unsigned vector);
+
+    GHashTable *ctx_cache;          /* Device translation Context Cache */
 
     AddressSpace trap_as;           /* MRIF/MSI access trap address space */
     MemoryRegion trap_mr;           /* MRIF/MSI access trap memory region */
@@ -671,14 +675,85 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     return 0;
 }
 
-/*
- * Return translation context for a given {devid, pasid}.
- * Translation context must be released with riscv_iommu_ctx_put().
- */
+/* Translation Context cache support */
+static gboolean __ctx_equal(gconstpointer v1, gconstpointer v2)
+{
+    RISCVIOMMUContext *c1 = (RISCVIOMMUContext *) v1;
+    RISCVIOMMUContext *c2 = (RISCVIOMMUContext *) v2;
+    return c1->devid == c2->devid && c1->pasid == c2->pasid;
+}
+
+static guint __ctx_hash(gconstpointer v)
+{
+    RISCVIOMMUContext *ctx = (RISCVIOMMUContext *) v;
+    return (guint)(ctx->devid) + ((guint)(ctx->pasid) << 24);
+}
+
+static void __ctx_inval_pasid(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUContext *ctx = (RISCVIOMMUContext *) value;
+    RISCVIOMMUContext *arg = (RISCVIOMMUContext *) data;
+    if ((ctx->tc & RIO_DCTC_VALID) &&
+        (ctx->devid == arg->devid) && (ctx->pasid == arg->pasid)) {
+        ctx->tc &= ~RIO_DCTC_VALID;
+    }
+}
+
+static void __ctx_inval_devid(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUContext *ctx = (RISCVIOMMUContext *) value;
+    RISCVIOMMUContext *arg = (RISCVIOMMUContext *) data;
+    if ((ctx->tc & RIO_DCTC_VALID) &&
+        (ctx->devid == arg->devid)) {
+        ctx->tc &= ~RIO_DCTC_VALID;
+    }
+}
+
+static void __ctx_inval_any(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUContext *ctx = (RISCVIOMMUContext *) value;
+    if (ctx->tc & RIO_DCTC_VALID) {
+        ctx->tc &= ~RIO_DCTC_VALID;
+    }
+}
+
+static void riscv_iommu_ctx_inval(RISCVIOMMUState *s, GHFunc func,
+        uint32_t devid, uint32_t pasid)
+{
+    GHashTable *ctx_cache;
+    RISCVIOMMUContext key = {
+        .devid = devid,
+        .pasid = pasid,
+    };
+    ctx_cache = g_hash_table_ref(s->ctx_cache);
+    g_hash_table_foreach(ctx_cache, func, &key);
+    g_hash_table_unref(ctx_cache);
+}
+
+/* Find or allocate translation context for a given {device_id, process_id} */
 static RISCVIOMMUContext *riscv_iommu_ctx(RISCVIOMMUState *s,
         unsigned devid, unsigned pasid, void **ref)
 {
+    GHashTable *ctx_cache;
     RISCVIOMMUContext *ctx;
+    RISCVIOMMUContext key = {
+        .devid = devid,
+        .pasid = pasid,
+    };
+
+    ctx_cache = g_hash_table_ref(s->ctx_cache);
+    ctx = g_hash_table_lookup(ctx_cache, &key);
+
+    if (ctx && (ctx->tc & RIO_DCTC_VALID)) {
+        *ref = ctx_cache;
+        return ctx;
+    }
+
+    if (g_hash_table_size(s->ctx_cache) >= LIMIT_CACHE_CTX) {
+        ctx_cache = g_hash_table_new_full(__ctx_hash, __ctx_equal,
+                                          g_free, NULL);
+        g_hash_table_unref(qatomic_xchg(&s->ctx_cache, ctx_cache));
+    }
 
     ctx = g_new0(RISCVIOMMUContext, 1);
     ctx->devid = devid;
@@ -686,9 +761,13 @@ static RISCVIOMMUContext *riscv_iommu_ctx(RISCVIOMMUState *s,
 
     int fault = riscv_iommu_ctx_fetch(s, ctx);
     if (!fault) {
-        *ref = ctx;
+        g_hash_table_add(ctx_cache, ctx);
+        *ref = ctx_cache;
         return ctx;
     }
+
+    g_hash_table_unref(ctx_cache);
+    *ref = NULL;
 
     if (!(ctx->tc & RIO_DCTC_DTF)) {
         RISCVIOMMUEvent ev = {
@@ -709,7 +788,7 @@ static RISCVIOMMUContext *riscv_iommu_ctx(RISCVIOMMUState *s,
 static void riscv_iommu_ctx_put(RISCVIOMMUState *s, void *ref)
 {
     if (ref) {
-        g_free(ref);
+        g_hash_table_unref((GHashTable *)ref);
     }
 }
 
@@ -906,6 +985,16 @@ static void riscv_iommu_process_cq_tail(RISCVIOMMUState *s)
             break;
 
         case RIO_CMD_IODIR:
+            if (!(cmd.request & RIO_IODIR_DID_VALID)) {
+                func = __ctx_inval_any;
+            } else if (cmd.request & RIO_IODIR_PID_VALID) {
+                func = __ctx_inval_pasid;
+            } else {
+                func = __ctx_inval_devid;
+            }
+            riscv_iommu_ctx_inval(s, func,
+                    get_field(cmd.request, RIO_IODIR_MASK_DID),
+                    get_field(cmd.request, RIO_IODIR_MASK_PID));
             break;
 
         default:
@@ -1369,6 +1458,10 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
             "riscv-iommu-trap", ~0ULL);
     address_space_init(&s->trap_as, &s->trap_mr, "riscv-iommu-trap-as");
 
+    /* Device translation context cache */
+    s->ctx_cache = g_hash_table_new_full(__ctx_hash, __ctx_equal,
+                                         g_free, NULL);
+
     s->iommus.le_next = NULL;
     s->iommus.le_prev = NULL;
     QLIST_INIT(&s->spaces);
@@ -1388,6 +1481,7 @@ static void riscv_iommu_exit(RISCVIOMMUState *s)
     qemu_thread_join(&s->core_proc);
     qemu_cond_destroy(&s->core_cond);
     qemu_mutex_destroy(&s->core_lock);
+    g_hash_table_unref(s->ctx_cache);
 }
 
 static AddressSpace *riscv_iommu_find_as(PCIBus *bus, void *opaque, int devid)
