@@ -39,12 +39,14 @@
 #endif
 
 #define LIMIT_CACHE_CTX               (1U << 7)
+#define LIMIT_CACHE_IOT               (1U << 20)
 
 /* Physical page number coversions */
 #define PPN_PHYS(ppn)                 ((ppn) << TARGET_PAGE_BITS)
 #define PPN_DOWN(phy)                 ((phy) >> TARGET_PAGE_BITS)
 
 typedef struct RISCVIOMMUContext RISCVIOMMUContext;
+typedef struct RISCVIOMMUEntry   RISCVIOMMUEntry;
 typedef struct RISCVIOMMUState   RISCVIOMMUState;
 
 struct RISCVIOMMUState {
@@ -80,6 +82,7 @@ struct RISCVIOMMUState {
     void (*notify)(RISCVIOMMUState *iommu, unsigned vector);
 
     GHashTable *ctx_cache;          /* Device translation Context Cache */
+    GHashTable *iot_cache;          /* IO Translated Address Cache */
 
     AddressSpace trap_as;           /* MRIF/MSI access trap address space */
     MemoryRegion trap_mr;           /* MRIF/MSI access trap memory region */
@@ -115,6 +118,16 @@ struct RISCVIOMMUContext {
     uint64_t msi_addr_mask;     /* MSI filtering - address mask */
     uint64_t msi_addr_pattern;  /* MSI filtering - address pattern */
     uint64_t msi_redirect;      /* MSI redirection page table pointer */
+};
+
+/* iot_cache elements, IOATC entry */
+struct RISCVIOMMUEntry {
+    uint64_t iova:44;           /* IOVA Page Number */
+    uint64_t pscid:20;          /* Process Soft-Context identifier */
+    uint64_t phys:44;           /* Physical Page Number */
+    uint64_t gscid:16;          /* Guest Soft-Context identifier */
+    uint64_t perm:2;            /* IOMMU_RW flags */
+    uint64_t __rfu:2;
 };
 
 /* Register helper functions */
@@ -842,11 +855,105 @@ static RISCVIOMMUSpace *riscv_iommu_space(RISCVIOMMUState *s, uint32_t devid)
     return as;
 }
 
+/* Translation Object cache support */
+static gboolean __iot_equal(gconstpointer v1, gconstpointer v2)
+{
+    RISCVIOMMUEntry *t1 = (RISCVIOMMUEntry *) v1;
+    RISCVIOMMUEntry *t2 = (RISCVIOMMUEntry *) v2;
+    return t1->gscid == t2->gscid && t1->pscid == t2->pscid &&
+           t1->iova == t2->iova;
+}
+
+static guint __iot_hash(gconstpointer v)
+{
+    RISCVIOMMUEntry *t = (RISCVIOMMUEntry *) v;
+    return (guint)t->iova;
+}
+
+/* GV: 1 PSCV: 1 AV: 1 */
+static void __iot_inval_iova(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUEntry *iot = (RISCVIOMMUEntry *) value;
+    RISCVIOMMUEntry *arg = (RISCVIOMMUEntry *) data;
+    if (iot->gscid == arg->gscid && iot->pscid == arg->pscid &&
+        iot->iova == arg->iova) {
+        iot->perm = 0;
+    }
+}
+
+/* GV: 1 PSCV: 1 AV: X */
+static void __iot_inval_pscid(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUEntry *iot = (RISCVIOMMUEntry *) value;
+    RISCVIOMMUEntry *arg = (RISCVIOMMUEntry *) data;
+    if (iot->gscid == arg->gscid && iot->pscid == arg->pscid) {
+        iot->perm = 0;
+    }
+}
+
+/* GV: 1 PSCV: X AV: X */
+static void __iot_inval_gscid(gpointer key, gpointer value, gpointer data)
+{
+    RISCVIOMMUEntry *iot = (RISCVIOMMUEntry *) value;
+    RISCVIOMMUEntry *arg = (RISCVIOMMUEntry *) data;
+    if (iot->gscid == arg->gscid) {
+        iot->perm = 0;
+    }
+}
+
+/* caller should keep ref-count for iot_cache object */
+static RISCVIOMMUEntry *riscv_iommu_iot_lookup(RISCVIOMMUContext *ctx,
+        GHashTable *iot_cache, hwaddr iova)
+{
+    RISCVIOMMUEntry key = {
+        .gscid = get_field(ctx->gatp, RIO_ATP_MASK_GSCID),
+        .pscid = get_field(ctx->ta, RIO_PCTA_MASK_PSCID),
+        .iova  = PPN_DOWN(iova),
+    };
+    return g_hash_table_lookup(iot_cache, &key);
+}
+
+/* caller should keep ref-count for iot_cache object */
+static void riscv_iommu_iot_update(RISCVIOMMUState *s,
+        GHashTable *iot_cache, RISCVIOMMUEntry *iot)
+{
+    if (g_hash_table_size(s->iot_cache) >= LIMIT_CACHE_IOT) {
+        iot_cache = g_hash_table_new_full(__iot_hash, __iot_equal,
+                                          g_free, NULL);
+        g_hash_table_unref(qatomic_xchg(&s->iot_cache, iot_cache));
+    }
+    g_hash_table_add(iot_cache, iot);
+}
+
+static void riscv_iommu_iot_inval(RISCVIOMMUState *s, GHFunc func,
+        uint32_t gscid, uint32_t pscid, hwaddr iova)
+{
+    GHashTable *iot_cache;
+    RISCVIOMMUEntry key = {
+        .gscid = gscid,
+        .pscid = pscid,
+        .iova  = PPN_DOWN(iova),
+    };
+
+    if (func == NULL) {
+        iot_cache = g_hash_table_new_full(__iot_hash, __iot_equal,
+                                          g_free, NULL);
+        g_hash_table_unref(qatomic_xchg(&s->iot_cache, iot_cache));
+    } else {
+        iot_cache = g_hash_table_ref(s->iot_cache);
+        g_hash_table_foreach(iot_cache, func, &key);
+        g_hash_table_unref(iot_cache);
+    }
+}
+
 static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         IOMMUTLBEntry *iotlb)
 {
+    RISCVIOMMUEntry *iot;
+    IOMMUAccessFlags perm;
     bool enable_faults = true;
     bool enable_pasid = false;
+    GHashTable *iot_cache;
     int fault;
 
     if ((iotlb->perm & IOMMU_WO) &&
@@ -858,6 +965,8 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         return 0;
     }
 
+    iot_cache = g_hash_table_ref(s->iot_cache);
+
     enable_faults = !(ctx->tc & RIO_DCTC_DTF);
     enable_pasid = (ctx->tc & RIO_DCTC_PDTV) && (ctx->ta & RIO_PCTA_V);
 
@@ -867,10 +976,33 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         goto done;
     }
 
+    iot = riscv_iommu_iot_lookup(ctx, iot_cache, iotlb->iova);
+    perm = iot ? iot->perm : IOMMU_NONE;
+    if (perm != IOMMU_NONE) {
+        iotlb->translated_addr = PPN_PHYS(iot->phys);
+        iotlb->addr_mask = ~TARGET_PAGE_MASK;
+        iotlb->perm = perm;
+        fault = 0;
+        goto done;
+    }
+
     /* Translate using device directory / page table information. */
     fault = riscv_iommu_spa_fetch(s, ctx, iotlb, false);
 
+    if (!fault && (ctx->ta & RIO_PCTA_V) &&
+        (iotlb->translated_addr != iotlb->iova)) {
+        iot = g_new0(RISCVIOMMUEntry, 1);
+        iot->iova = PPN_DOWN(iotlb->iova);
+        iot->phys = PPN_DOWN(iotlb->translated_addr);
+        iot->gscid = get_field(ctx->gatp, RIO_ATP_MASK_GSCID);
+        iot->pscid = get_field(ctx->ta, RIO_PCTA_MASK_PSCID);
+        iot->perm = iotlb->perm;
+        riscv_iommu_iot_update(s, iot_cache, iot);
+    }
+
 done:
+    g_hash_table_unref(iot_cache);
+
     if (enable_faults && fault) {
         RISCVIOMMUEvent ev;
         const unsigned ttype = (iotlb->perm & IOMMU_RW) ? RIO_TTYP_UWR :
@@ -982,6 +1114,33 @@ static void riscv_iommu_process_cq_tail(RISCVIOMMUState *s)
             break;
 
         case RIO_CMD_IOTINVAL:
+            if (cmd.request & RIO_IOTINVAL_MSI) {
+                /* MSI cache not implemented */
+                break;
+            }
+            do {
+                func = NULL;
+                if (!(cmd.request & RIO_IOTINVAL_GSCID_VALID)) {
+                    break;
+                }
+                func = __iot_inval_gscid;
+                if (cmd.request & RIO_IOTINVAL_GSTAGE) {
+                    break;
+                }
+                if (!(cmd.request & RIO_IOTINVAL_PSCID_VALID)) {
+                    break;
+                }
+                func = __iot_inval_pscid;
+                if (!(cmd.request & RIO_IOTINVAL_ADDR_VALID)) {
+                    break;
+                }
+                func = __iot_inval_iova;
+            } while (0) ;
+
+            riscv_iommu_iot_inval(s, func,
+                    get_field(cmd.request, RIO_IOTINVAL_MASK_GSCID),
+                    get_field(cmd.request, RIO_IOTINVAL_MASK_PSCID),
+                    cmd.address & TARGET_PAGE_MASK);
             break;
 
         case RIO_CMD_IODIR:
@@ -1461,6 +1620,8 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
     /* Device translation context cache */
     s->ctx_cache = g_hash_table_new_full(__ctx_hash, __ctx_equal,
                                          g_free, NULL);
+    s->iot_cache = g_hash_table_new_full(__iot_hash, __iot_equal,
+                                         g_free, NULL);
 
     s->iommus.le_next = NULL;
     s->iommus.le_prev = NULL;
@@ -1481,6 +1642,7 @@ static void riscv_iommu_exit(RISCVIOMMUState *s)
     qemu_thread_join(&s->core_proc);
     qemu_cond_destroy(&s->core_cond);
     qemu_mutex_destroy(&s->core_lock);
+    g_hash_table_unref(s->iot_cache);
     g_hash_table_unref(s->ctx_cache);
 }
 
