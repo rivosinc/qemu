@@ -48,6 +48,7 @@ typedef struct RISCVIOMMUState   RISCVIOMMUState;
 struct RISCVIOMMUState {
     uint32_t devid;       /* requester Id, 0 if not assigned. */
     uint32_t version;     /* Reported interface version number */
+    uint32_t pasid_bits;  /* process identifier width */
 
     uint64_t cap;         /* IOMMU supported capabitilites */
 
@@ -101,7 +102,8 @@ struct RISCVIOMMUSpace {
 /* ctx_cache elements, translation context state. */
 struct RISCVIOMMUContext {
     uint64_t devid:24;          /* Requester Id, AKA device_id */
-    uint64_t __rfu:40;          /* reserved */
+    uint64_t pasid:20;          /* Process Address Space ID */
+    uint64_t __rfu:20;          /* reserved */
     uint64_t tc;                /* Translation Control */
     uint64_t ta;                /* Translation Attributes */
     uint64_t satp;              /* S-Stage address translation and protection */
@@ -526,7 +528,7 @@ static MemTxResult riscv_iommu_msi_write(RISCVIOMMUState *s,
  * RISC-V IOMMU Device Context Loopkup - Device Directory Tree Walk
  *
  * @s         : IOMMU Device State
- * @ctx       : Device Translation Context with devid set.
+ * @ctx       : Device Translation Context with devid and pasid set.
  * @return    : success or fault code.
  */
 static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
@@ -620,26 +622,67 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
 
     if (mode == RIO_PDTP_MODE_BARE) {
         return 0;                       /* No S-Stage translation */
+     }
+
+    if (!(ctx->tc & RIO_DCTC_PDTV)) {
+        if (ctx->pasid) {
+            return RIO_CAUSE_REQ_INVALID; /* PASID is disabled */
+        }
+        if (mode > RIO_ATP_MODE_SV57) {
+            return RIO_CAUSE_DDT_INVALID; /* Invalid SATP.MODE */
+        }
+        return 0;
     }
 
-    if (ctx->tc & RIO_DCTC_PDTV) {
-        return RIO_CAUSE_REQ_INVALID;   /* No PASID support */
+    /* FSC.TC.PDTV enabled */
+    if (mode > RIO_PDTP_MODE_PD8) {
+        return RIO_CAUSE_PDT_UNSUPPORTED; /* Invalid PDTP.MODE */
+    }
+
+    for (depth = RIO_PDTP_MODE_PD8 - mode; depth-- > 0; ) {
+        const int split = depth * 9 + 8;
+        addr |= ((ctx->pasid >> split) << 3) & ~TARGET_PAGE_MASK;
+        if (dma_memory_read(s->target_as, addr, &de, sizeof(de),
+                            MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+            return RIO_CAUSE_PDT_FAULT;
+        }
+        le64_to_cpus(&de);
+        if (!(de & RIO_PDTE_VALID)) {
+            return RIO_CAUSE_PDT_INVALID;
+        }
+        addr = PPN_PHYS(get_field(de, RIO_PDTE_MASK_PPN));
+    }
+
+    /* Leaf entry in PDT */
+    addr |= (ctx->pasid << 4) & ~TARGET_PAGE_MASK;
+    if (dma_memory_read(s->target_as, addr, &dc.ta, sizeof(uint64_t) * 2,
+                        MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
+        return RIO_CAUSE_PDT_FAULT;
+    }
+
+    /* Use FSC and TA from process directory entry. */
+    ctx->ta = le64_to_cpu(dc.ta);
+    ctx->satp = le64_to_cpu(dc.fsc);
+
+    if (!(ctx->ta & RIO_PCTA_V)) {
+        return RIO_CAUSE_PDT_INVALID;
     }
 
     return 0;
 }
 
 /*
- * Return translation context for a given {device_id}.
+ * Return translation context for a given {devid, pasid}.
  * Translation context must be released with riscv_iommu_ctx_put().
  */
 static RISCVIOMMUContext *riscv_iommu_ctx(RISCVIOMMUState *s,
-        unsigned devid, void **ref)
+        unsigned devid, unsigned pasid, void **ref)
 {
     RISCVIOMMUContext *ctx;
 
     ctx = g_new0(RISCVIOMMUContext, 1);
     ctx->devid = devid;
+    ctx->pasid = pasid;
 
     int fault = riscv_iommu_ctx_fetch(s, ctx);
     if (!fault) {
@@ -724,6 +767,7 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         IOMMUTLBEntry *iotlb)
 {
     bool enable_faults = true;
+    bool enable_pasid = false;
     int fault;
 
     if ((iotlb->perm & IOMMU_WO) &&
@@ -736,6 +780,7 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
     }
 
     enable_faults = !(ctx->tc & RIO_DCTC_DTF);
+    enable_pasid = (ctx->tc & RIO_DCTC_PDTV) && (ctx->ta & RIO_PCTA_V);
 
     /* Check for ATS request while ATS is disabled */
     if ((iotlb->perm == IOMMU_NONE) && !(ctx->tc & RIO_DCTC_EN_ATS)) {
@@ -753,6 +798,8 @@ done:
                 ((iotlb->perm & IOMMU_RO) ? RIO_TTYP_URD : RIO_TTYP_ATS);
         ev.reason = set_field(ctx->devid, RIO_EVENT_MASK_CAUSE, fault);
         ev.reason = set_field(ev.reason, RIO_EVENT_MASK_TTYPE, ttype);
+        ev.reason = set_field(ev.reason, RIO_EVENT_PV, enable_pasid);
+        ev.reason = set_field(ev.reason, RIO_EVENT_MASK_PID, ctx->pasid);
         ev.iova   = iotlb->iova;
         ev.phys   = iotlb->translated_addr;
         ev._rsrvd = 0;
@@ -819,6 +866,7 @@ static void riscv_iommu_process_cq_tail(RISCVIOMMUState *s)
     MemTxResult res;
     dma_addr_t addr;
     uint32_t tail, head, ctrl;
+    GHFunc func;
 
     ctrl = riscv_iommu_reg_get32(s, RIO_REG_CQCSR);
     tail = riscv_iommu_reg_get32(s, RIO_REG_CQT) & s->cq_mask;
@@ -972,7 +1020,7 @@ static void riscv_iommu_process_dbg(RISCVIOMMUState *s)
         return;
     }
 
-    ctx = riscv_iommu_ctx(s, devid, &ref);
+    ctx = riscv_iommu_ctx(s, devid, 0, &ref);
     if (ctx == NULL) {
         riscv_iommu_reg_set64(s, RIO_REG_TR_RESPONSE,
                 RIO_TRRSP_FAULT | (RIO_CAUSE_DMA_DISABLED << 10));
@@ -1224,7 +1272,7 @@ static MemTxResult riscv_iommu_trap_write(void *opaque, hwaddr addr,
         return MEMTX_ACCESS_ERROR;
     }
 
-    ctx = riscv_iommu_ctx(s, devid, &ref);
+    ctx = riscv_iommu_ctx(s, devid, 0, &ref);
     if (ctx == NULL) {
         res = MEMTX_ACCESS_ERROR;
     } else {
@@ -1277,6 +1325,9 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
 
     /* Report QEMU target physical address space limits */
     s->cap = set_field(s->cap, RIO_CAP_PAS_MASK, TARGET_PHYS_ADDR_SPACE_BITS);
+
+    /* TODO: method to report supported PASID bits */
+    s->pasid_bits = 20;
 
     /* Out-of-reset translation mode: OFF (DMA disabled) BARE (passthrough) */
     s->ddtp = set_field(0, RIO_DDTP_MASK_MODE, s->enable_off ?
@@ -1531,7 +1582,7 @@ static IOMMUTLBEntry riscv_iommu_memory_region_translate(
         .perm = flag,
     };
 
-    ctx = riscv_iommu_ctx(as->iommu, as->devid, &ref);
+    ctx = riscv_iommu_ctx(as->iommu, as->devid, iommu_idx, &ref);
     if (ctx == NULL) {
         /* Translation disabled or invalid. */
         iotlb.addr_mask = 0;
