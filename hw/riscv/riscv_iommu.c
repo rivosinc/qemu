@@ -1575,7 +1575,7 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
     s->cap = set_field(s->cap, RIO_CAP_PAS_MASK, TARGET_PHYS_ADDR_SPACE_BITS);
 
     /* TODO: method to report supported PASID bits */
-    s->pasid_bits = 20;
+    s->pasid_bits = 8; /* restricted to size of MemTxAttrs.pasid */
 
     /* Out-of-reset translation mode: OFF (DMA disabled) BARE (passthrough) */
     s->ddtp = set_field(0, RIO_DDTP_MASK_MODE, s->enable_off ?
@@ -1869,12 +1869,26 @@ static int riscv_iommu_memory_region_notify(
     return 0;
 }
 
+static int riscv_iommu_memory_region_index(IOMMUMemoryRegion *iommu_mr,
+        MemTxAttrs attrs)
+{
+    return attrs.unspecified ? 0 : (int)attrs.pasid;
+}
+
+static int riscv_iommu_memory_region_index_len(IOMMUMemoryRegion *iommu_mr)
+{
+    RISCVIOMMUSpace *as = container_of(iommu_mr, RISCVIOMMUSpace, iova_mr);
+    return 1 << as->iommu->pasid_bits;
+}
+
 static void riscv_iommu_memory_region_init(ObjectClass *klass, void *data)
 {
     IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
 
     imrc->translate = riscv_iommu_memory_region_translate;
     imrc->notify_flag_changed = riscv_iommu_memory_region_notify;
+    imrc->attrs_to_index = riscv_iommu_memory_region_index;
+    imrc->num_indexes = riscv_iommu_memory_region_index_len;
 }
 
 static const TypeInfo riscv_iommu_memory_region_info = {
