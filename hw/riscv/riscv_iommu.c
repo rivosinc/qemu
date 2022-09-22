@@ -1706,6 +1706,20 @@ static void riscv_iommu_pci_realize(PCIDevice *dev, Error **errp)
 
     pcie_endpoint_cap_init(dev, 0);
 
+    int ea_off = pci_add_capability(dev, 0x14, 0, 16, &error_fatal);
+    if (ea_off >= 0) {
+        /* EAC.NumEntries := 1 */
+        pci_set_long(dev->config + ea_off,
+            pci_get_long(dev->config + ea_off) | (1 << 16));
+        /* EAE.Enable := 0, EAE.EntrySize := 2, 32b address only */
+        pci_set_long(dev->config + ea_off + 4, 4);
+        /* Set EAE.Enable and base/max-offset writeable */
+        pci_set_long(dev->wmask + ea_off + 4, 1u << 31);
+        /* TODO: restrict writes to RoT role */
+        pci_set_long(dev->wmask + ea_off + 8, ~0);
+        pci_set_long(dev->wmask + ea_off + 12, ~0);
+    }
+
     pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
             PCI_BASE_ADDRESS_MEM_TYPE_64, &s->bar0);
 
