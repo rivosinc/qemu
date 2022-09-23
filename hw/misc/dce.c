@@ -84,7 +84,7 @@ static void dce_raise_interrupt(DCEState *state, int WQ_id,
                 DCEInterruptSource val)
 {
     /* TODO: support other interrupts */
-    printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
+    // printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
     uint64_t irq_status = ldq_le_p(&state->regs_rw[0][DCE_REG_WQIRQSTS]);
     irq_status |= BIT(val);
     if (irq_status) {
@@ -112,8 +112,8 @@ static bool aligned(hwaddr addr, unsigned size)
 static inline bool interrupt_on_completion(DCEState *state,
                                            struct DCEDescriptor *descriptor)
 {
-    printf("ctrl is 0x%x\n", descriptor->ctrl);
-    printf("MSI enabled? %d\n", dce_msi_enabled(state));
+    // printf("ctrl is 0x%x\n", descriptor->ctrl);
+    // printf("MSI enabled? %d\n", dce_msi_enabled(state));
     return (descriptor->ctrl & 1);
 }
 
@@ -168,8 +168,8 @@ static void get_next_ptr_and_size(PCIDevice * dev, uint64_t * entry,
     if (err) {
         printf("ERROR in %s!\n", __func__);
     } else {
-        printf("Read buffer: 0x%lx\n",  *curr_ptr);
-        printf("Read size: 0x%lx\n", *curr_size);
+        // printf("Read buffer: 0x%lx\n",  *curr_ptr);
+        // printf("Read size: 0x%lx\n", *curr_size);
     }
 }
 
@@ -211,7 +211,7 @@ static MemTxAttrs initialize_pasid_attrs_transctl(DCEState *state,
     if (pasid_valid) {
         attrs.unspecified = 0;
         attrs.pasid = FIELD_EX64(transctl, DCE_TRANSCTL, TRANSCTL_PASID);
-        printf("Setting pasid to %d\n", attrs.pasid );
+        // printf("Setting pasid to %d\n", attrs.pasid );
         attrs.requester_id = pci_requester_id(&state->dev);
         attrs.secure = 0;
     }
@@ -636,7 +636,7 @@ cleanup:
 
 static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor, MemTxAttrs * attrs)
 {
-    printf("In %s\n", __func__);
+    // printf("In %s\n", __func__);
     uint8_t keyid = descriptor->dest;
     if(keyid >= NUM_KEY_SLOTS){
         return;
@@ -652,7 +652,7 @@ static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor, MemT
 
 static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
 {
-    printf("In %s\n", __func__);
+    // printf("In %s\n", __func__);
     unsigned char * key = state->keys[descriptor->dest];
     memset(key, 0, DCE_AES_KEYLEN);
     MemTxAttrs attrs = initialize_pasid_attrs(state, descriptor);
@@ -672,10 +672,10 @@ static void finish_descriptor(DCEState *state, int WQ_id,
         (FIELD_EX64(transctl, DCE_TRANSCTL ,TRANSCTL_SUPV) == 1);
     MemTxAttrs * attrs_to_use = is_priviledged ? &desc_attrs : &transctl_attrs;
 
-    printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
+    // printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
 
     if (ret) printf("ERROR: %x\n", ret);
-    printf("Processing descriptor with opcode %d\n", descriptor.opcode);
+    // printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
         case DCE_OPCODE_MEMCPY:
@@ -717,7 +717,7 @@ DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    printf("in %s, addr: 0x%lx\n", __func__, addr);
+    // printf("in %s, addr: 0x%lx\n", __func__, addr);
 
     assert(aligned(addr, size));
     // DCEState *state = (DCEState*) opaque;
@@ -730,7 +730,7 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                     unsigned size)
 {
-    printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
+    // printf("in %s, addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
 
     DCEState *s = (DCEState*) opaque;
 
@@ -794,7 +794,7 @@ static void dce_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     if (exec) {
         /* set the execute flag on the pf */
         qatomic_or(&(s->pfstate->core_exec), exec);
-        printf("Signaling conditioon\n");
+        // printf("Signaling conditioon\n");
         qemu_cond_signal(&(s->pfstate->core_cond));
     }
 }
