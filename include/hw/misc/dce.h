@@ -25,7 +25,7 @@ REG32(DCE_INTERRUPT_STATUS,                       72)
 REG32(DCE_INTERRUPT_MASK,                         80)
 
 enum {
-    STATUS_PASS,
+    STATUS_PASS = 0,
     STATUS_FAIL
 };
 

@@ -615,6 +615,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
             break;
         default:
             /* TODO add error code */
+            err |= -1;
             break;
     }
 
@@ -634,11 +635,16 @@ cleanup:
     free(dest_local);
 }
 
-static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor, MemTxAttrs * attrs)
+static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor,
+        MemTxAttrs * attrs)
 {
     // printf("In %s\n", __func__);
     uint8_t keyid = descriptor->dest;
     if(keyid >= NUM_KEY_SLOTS){
+        //Write error in completion
+        complete_workload(state, descriptor,
+                -1, 0, 0, /* error, spec, data */
+                attrs);
         return;
     }
 
@@ -650,13 +656,20 @@ static void dce_load_key(DCEState *state, struct DCEDescriptor *descriptor, MemT
     complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN, attrs);
 }
 
-static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor)
+static void dce_clear_key(DCEState *state, struct DCEDescriptor *descriptor,
+        MemTxAttrs * attrs)
 {
     // printf("In %s\n", __func__);
-    unsigned char * key = state->keys[descriptor->dest];
+    uint8_t keyid = descriptor->dest;
+    if(keyid >= NUM_KEY_SLOTS){
+        complete_workload(state, descriptor,
+                -1, 0, 0, /* error, spec, data */
+                attrs);
+        return;
+    }
+    unsigned char * key = state->keys[keyid];
     memset(key, 0, DCE_AES_KEYLEN);
-    MemTxAttrs attrs = initialize_pasid_attrs(state, descriptor);
-    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN, &attrs);
+    complete_workload(state, descriptor, 0, 0, DCE_AES_KEYLEN, attrs);
 }
 
 static void finish_descriptor(DCEState *state, int WQ_id,
@@ -694,7 +707,7 @@ static void finish_descriptor(DCEState *state, int WQ_id,
         case DCE_OPCODE_LOAD_KEY:
             dce_load_key(state, &descriptor, attrs_to_use); break;
         case DCE_OPCODE_CLEAR_KEY:
-            dce_clear_key(state, &descriptor); break;
+            dce_clear_key(state, &descriptor, attrs_to_use); break;
     }
     /* interupt only in priviledged mode */
     if (interrupt_on_completion(state, &descriptor) && is_priviledged)
