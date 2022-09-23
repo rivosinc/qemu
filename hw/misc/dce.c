@@ -13,17 +13,16 @@
 // #include "hw/riscv/riscv_hart.h" FIXME
 #define DCE_PAGE_SIZE  (1 << 12)
 
+#ifdef CONFIG_DCE_COMPRESSION
 #include "lz4.h"
 #include "snappy-c.h"
 #include "zlib.h"
 #include "zstd.h"
+#endif // CONFIG_DCE_COMPRESSION
+
 #ifdef CONFIG_DCE_CRYPTO
 #include "dce-crypto.h"
-#endif
-
-#include <openssl/conf.h>
-#include <openssl/evp.h>
-#include <openssl/err.h>
+#endif // CONFIG_DCE_CRYPTO
 
 #include "qapi/visitor.h"
 
@@ -473,6 +472,7 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
                                    const char * src, char * dst,
                                    size_t src_size, size_t * dst_size, int dir)
 {
+#ifdef CONFIG_DCE_COMPRESSION
     int err = 0;
     /* bit 1-3 in opernad 0 specify the compression format */
     //int comp_format = (descriptor->operand0 >> 1) & 0x7;
@@ -521,6 +521,9 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
     }
     if(err) printf("ERROR: %d\n", err);
     return err;
+#else  // CONFIG_DCE_COMPRESSION
+    return -1;
+#endif // CONFIG_DCE_COMPRESSION
 }
 
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
