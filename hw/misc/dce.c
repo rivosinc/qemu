@@ -739,6 +739,16 @@ static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 
     DCEState *s = (DCEState*) opaque;
 
+    if (size == 0 || size > 8 || (addr & (size - 1)) != 0) {
+        /* Unsupported MMIO alignment or access size */
+        return 0;
+    }
+
+    if (addr + size > sizeof(s->regs_rw)) {
+        /* Unsupported MMIO access location. */
+        return 0;
+    }
+
     uint64_t result = 0;
     uint32_t page = addr / DCE_PAGE_SIZE;
     addr = addr % DCE_PAGE_SIZE;
