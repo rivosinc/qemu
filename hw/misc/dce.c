@@ -84,9 +84,12 @@ static void dce_raise_interrupt(DCEState *state, int WQ_id,
                 DCEInterruptSource val)
 {
     /* TODO: support other interrupts */
-    // printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
-    uint64_t irq_status = ldq_le_p(&state->regs_rw[0][DCE_REG_WQIRQSTS]);
-    irq_status |= BIT(val);
+    /* TODO: lock */
+    printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
+    uint64_t irq_status = ldq_le_p(&state->regs_rw[WQMCC][DCE_REG_WQIRQSTS]);
+    irq_status |= BIT(WQ_id);
+    stq_le_p(&state->regs_rw[WQMCC][DCE_REG_WQIRQSTS], irq_status);
+    // irq_status |= BIT(val);
     if (irq_status) {
         if (dce_msi_enabled(state)) {
             msi_notify(&state->dev, 0);
@@ -731,13 +734,24 @@ DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    // printf("in %s, addr: 0x%lx\n", __func__, addr);
-
+    printf("in %s, addr: 0x%lx\n", __func__, addr);
     assert(aligned(addr, size));
-    // DCEState *state = (DCEState*) opaque;
+
+    DCEState *s = (DCEState*) opaque;
 
     uint64_t result = 0;
-    /* FIXME: insert content */
+    uint32_t page = addr / DCE_PAGE_SIZE;
+    addr = addr % DCE_PAGE_SIZE;
+
+    if (size == 1) {
+        result = s->regs_rw[page][addr];
+    } else if (size == 2) {
+        result = lduw_le_p(&s->regs_rw[page][addr]);
+    } else if (size == 4) {
+        result = ldl_le_p(&s->regs_rw[page][addr]);
+    } else if (size == 8) {
+        result = ldq_le_p(&s->regs_rw[page][addr]);
+    }
     return result;
 }
 

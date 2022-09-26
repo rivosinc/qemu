@@ -71,18 +71,6 @@ typedef struct DCEDescriptor {
     uint64_t operand4;
 } QEMU_PACKED DCEDescriptor;
 
-typedef struct WQMCC_t {
-    uint64_t WQITBA; /* Work Queue Information Table Base Address - IOVA. */
-    uint8_t WQLCCW; /* Weight of work queue Latency Critical (LC) */
-    uint8_t WQBCW; /* Weight of work queue batch class */
-    // ...
-    uint64_t WQRSTS; /* bitmap where each bit represents a WQ state */
-    uint64_t WQENABLE; /* Allow function to enable/disable WQ to the engine */
-    uint64_t WQIRQ; /* WQs which signaled a completion interrupt. */
-    uint64_t WQKEY; /* one-hot bitmap indicating which key slots are
-                       available to be used by this function. */
-} QEMU_PACKED WQMCC_t;
-
 #define SRC_IS_LIST                 (1 << 1)
 #define SRC2_IS_LIST                (1 << 2)
 #define DEST_IS_LIST                (1 << 3)
@@ -173,10 +161,6 @@ typedef struct __attribute__((packed)) WQITE {
     // TBA: key slot management
 } __attribute__((packed)) WQITE;
 
-// WQMCC
-REG64(DCE_WQITBA,   88)
-REG8(DCE_WQLCCW,    8)
-// ..
 // WQCR
 REG32(DCE_WQCR,     96)
     FIELD(DCE_WQCR, NOTIFY, 0, 1)
