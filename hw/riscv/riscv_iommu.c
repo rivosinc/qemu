@@ -56,6 +56,7 @@ struct RISCVIOMMUState {
     uint32_t devid;       /* requester Id, 0 if not assigned. */
     uint32_t version;     /* Reported interface version number */
     uint32_t pasid_bits;  /* process identifier width */
+    uint32_t bus;         /* PCI bus mapping for non-root endpoints */
 
     uint64_t cap;         /* IOMMU supported capabitilites */
 
@@ -993,6 +994,9 @@ static RISCVIOMMUSpace *riscv_iommu_space(RISCVIOMMUState *s, uint32_t devid)
         /* Handle only devices on the same bus as IOMMU device. */
         return NULL;
     }
+
+    /* FIXME: PCIe bus remapping for attached endpoints. */
+    devid |= s->bus << 8;
 
     qemu_mutex_lock(&s->core_lock);
     QLIST_FOREACH(as, &s->spaces, list) {
@@ -2281,6 +2285,7 @@ static const VMStateDescription riscv_iommu_vmstate = {
 
 static Property riscv_iommu_properties[] = {
     DEFINE_PROP_UINT32("version", RISCVIOMMUStatePci, iommu.version, 0x02),
+    DEFINE_PROP_UINT32("bus", RISCVIOMMUStatePci, iommu.bus, 0x0),
     DEFINE_PROP_BOOL("intremap", RISCVIOMMUStatePci, iommu.enable_msi, TRUE),
     DEFINE_PROP_BOOL("ats", RISCVIOMMUStatePci, iommu.enable_ats, TRUE),
     DEFINE_PROP_BOOL("off", RISCVIOMMUStatePci, iommu.enable_off, TRUE),
