@@ -245,13 +245,18 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
 {
     dma_addr_t addr, base;
     uint64_t satp, gatp, pte;
-    bool pass, en_s, en_g;
+    bool en_s, en_g;
     struct {
         unsigned char step;
         unsigned char levels;
         unsigned char ptidxbits;
         unsigned char ptesize;
     } sc[2];
+    /* Translation stage phase */
+    enum {
+        S_STAGE = 0,
+        G_STAGE = 1,
+    } pass;
 
     satp = get_field(ctx->satp, RIO_ATP_MASK_MODE);
     gatp = get_field(ctx->gatp, RIO_ATP_MASK_MODE);
@@ -263,14 +268,13 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
     if (!(en_s || en_g)) {
         iotlb->translated_addr = iotlb->iova;
         iotlb->addr_mask = ~TARGET_PAGE_MASK;
-        /* No permission checks in pass-through mode */
+        /* Allow R/W in pass-through mode */
         iotlb->perm = IOMMU_RW;
         return 0;
     }
 
     /* S/G translation parameters. */
-    pass = true;
-    do {
+    for (pass = 0; pass < 2; pass++) {
         sc[pass].step = 0;
         switch (pass ? gatp : satp) {
         case RIO_ATP_MODE_BARE:
@@ -313,15 +317,14 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         default:
             return RIO_CAUSE_DDT_UNSUPPORTED;
         }
-        pass = !pass;
-    } while (!pass);
+    };
 
     /* S/G stages translation tables root pointers */
     gatp = PPN_PHYS(get_field(ctx->gatp, RIO_ATP_MASK_PPN));
     satp = PPN_PHYS(get_field(ctx->satp, RIO_ATP_MASK_PPN));
     addr = (en_s && en_g) ? satp : iotlb->iova;
     base = en_g ? gatp : satp;
-    pass = en_g;
+    pass = en_g ? G_STAGE : S_STAGE;
 
     do {
         const unsigned widened = (pass && !sc[pass].step) ? 2 : 0;
@@ -377,7 +380,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
             iotlb->addr_mask &= (1ULL << va_skip) - 1;
             /* Continue with S-Stage translation? */
             if (pass && sc[0].step != sc[0].levels) {
-                pass = false;
+                pass = S_STAGE;
                 addr = iotlb->iova;
                 continue;
             }
@@ -387,7 +390,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
                                                          : IOMMU_RO;
             /* Continue with G-Stage translation? */
             if (!pass && en_g) {
-                pass = true;
+                pass = G_STAGE;
                 addr = base;
                 base = gatp;
                 sc[pass].step = 0;
@@ -402,7 +405,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
 
         /* Continue with G-Stage translation? */
         if (!pass && en_g) {
-            pass = true;
+            pass = G_STAGE;
             addr = base;
             base = gatp;
             sc[pass].step = 0;
@@ -495,8 +498,12 @@ static MemTxResult riscv_iommu_msi_write(RISCVIOMMUState *s,
         return dma_memory_write(s->target_as, addr, &data, size, attrs);
     }
 
-    if ((data & ~0x7FF) || (iova & 0x07FF)) {
-        /* Invalid interrupt number */
+    /*
+     * Report an error for interrupt identities exceeding the maximum allowed
+     * for an IMSIC interrupt file (2047) or destination addres is not 32-bit
+     * aligned. See IOMMU Specification, Chapter 2.3. MSI page tables.
+     */
+    if ((data > 2047) || (iova & 3)) {
         return MEMTX_ACCESS_ERROR;
     }
 
@@ -553,7 +560,9 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     const uint64_t ddtp = s->ddtp;
     unsigned mode = get_field(ddtp, RIO_DDTP_MASK_MODE);
     dma_addr_t addr = PPN_PHYS(get_field(ddtp, RIO_DDTP_MASK_PPN));
-    const bool dcbase = !s->enable_msi; /* DC format mode: 1: BASE | 0: EXT */
+    /* Device Context format: 0: extended (64 bytes) | 1: base (32 bytes) */
+    const int dc_fmt = !s->enable_msi;
+    const size_t dc_len = sizeof(RISCVIOMMUDeviceContext) >> dc_fmt;
     unsigned depth;
     uint64_t de;
     RISCVIOMMUDeviceContext dc;
@@ -587,14 +596,30 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
         return RIO_CAUSE_DDT_UNSUPPORTED;
     }
 
-    /* Check supported device id range. */
-    if (ctx->devid >= (1 << (depth * 9 + 6 + (dcbase && depth != 2)))) {
+    /*
+     * Check supported device id width (in bits).
+     * See IOMMU Specification, Chapter 6. Software guidelines.
+     * - if extended device-context format is used:
+     *   1LVL: 6, 2LVL: 15, 3LVL: 24
+     * - if base device-context format is used:
+     *   1LVL: 7, 2LVL: 16, 3LVL: 24
+     */
+    if (ctx->devid >= (1 << (depth * 9 + 6 + (dc_fmt && depth != 2)))) {
         return RIO_CAUSE_DDT_INVALID;
     }
 
     /* Device directory tree walk */
     for (; depth-- > 0; ) {
-        const int split = depth * 9 + 6 + dcbase;
+        /*
+         * Select device id index bits based on device directory tree level
+         * and device context format.
+         * See IOMMU Specification, Chapter 2. Data Structures.
+         * - if extended device-context format is used:
+         *   device index: [23:15][14:6][5:0]
+         * - if base device-context format is used:
+         *   device index: [23:16][15:7][6:0]
+         */
+        const int split = depth * 9 + 6 + dc_fmt;
         addr |= ((ctx->devid >> split) << 3) & ~TARGET_PAGE_MASK;
         if (dma_memory_read(s->target_as, addr, &de, sizeof(de),
                             MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
@@ -611,11 +636,10 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     }
 
     /* index into device context entry page */
-    const size_t dcsize = sizeof(dc) >> dcbase;
-    addr |= (ctx->devid * dcsize) & ~TARGET_PAGE_MASK;
+    addr |= (ctx->devid * dc_len) & ~TARGET_PAGE_MASK;
 
     memset(&dc, 0, sizeof(dc));
-    if (dma_memory_read(s->target_as, addr, &dc, dcsize,
+    if (dma_memory_read(s->target_as, addr, &dc, dc_len,
                         MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
         return RIO_CAUSE_DDT_FAULT;
     }
@@ -657,6 +681,10 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     }
 
     for (depth = RIO_PDTP_MODE_PD8 - mode; depth-- > 0; ) {
+        /*
+         * Select process id index bits based on process directory tree
+         * level. See IOMMU Specification, 2.2. Process-Directory-Table.
+         */
         const int split = depth * 9 + 8;
         addr |= ((ctx->pasid >> split) << 3) & ~TARGET_PAGE_MASK;
         if (dma_memory_read(s->target_as, addr, &de, sizeof(de),
@@ -699,6 +727,7 @@ static gboolean __ctx_equal(gconstpointer v1, gconstpointer v2)
 static guint __ctx_hash(gconstpointer v)
 {
     RISCVIOMMUContext *ctx = (RISCVIOMMUContext *) v;
+    /* Generate simple hash of (pasid, devid), assuming 24-bit wide devid */
     return (guint)(ctx->devid) + ((guint)(ctx->pasid) << 24);
 }
 
@@ -1067,7 +1096,6 @@ static void riscv_iommu_process_ddtp(RISCVIOMMUState *s)
     }
     s->ddtp = new_ddtp;
 
-    /* System software is not allowed to modify DDTP while BUSY bit is set. */
     riscv_iommu_reg_set64(s, RIO_REG_DDTP, new_ddtp);
 }
 
@@ -1303,7 +1331,7 @@ enum {
     RIO_EXEC_PQCSR,
     RIO_EXEC_PQH,
     RIO_EXEC_TR_REQUEST,
-    RIO_EXEC_EXIT,  /* must be the last enum value */
+    RIO_EXEC_EXIT,  /* RIO_EXEC_EXIT must be the last enum value */
 };
 
 static void *riscv_iommu_core_proc(void* arg)
@@ -1507,6 +1535,13 @@ static const MemoryRegionOps riscv_iommu_mmio_ops = {
     }
 };
 
+/*
+ * Translations matching MSI pattern check are redirected to "riscv-iommu-trap"
+ * memory region as untranslated address, for additional MSI/MRIF interception
+ * by IOMMU interrupt remapping implementation.
+ * Note: Device emulation code generating an MSI is expected to provide a valid
+ * memory transaction attributes with requested_id set.
+ */
 static MemTxResult riscv_iommu_trap_write(void *opaque, hwaddr addr,
         uint64_t data, unsigned size, MemTxAttrs attrs)
 {
@@ -1790,7 +1825,7 @@ static const VMStateDescription riscv_iommu_vmstate = {
 
 static Property riscv_iommu_properties[] = {
     DEFINE_PROP_UINT32("version", RISCVIOMMUStatePci, iommu.version, 0x02),
-    DEFINE_PROP_BOOL("ir", RISCVIOMMUStatePci, iommu.enable_msi, TRUE),
+    DEFINE_PROP_BOOL("intremap", RISCVIOMMUStatePci, iommu.enable_msi, TRUE),
     DEFINE_PROP_BOOL("ats", RISCVIOMMUStatePci, iommu.enable_ats, TRUE),
     DEFINE_PROP_BOOL("off", RISCVIOMMUStatePci, iommu.enable_off, TRUE),
     DEFINE_PROP_BOOL("s-stage", RISCVIOMMUStatePci, iommu.enable_s_stage, TRUE),
