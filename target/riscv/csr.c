@@ -1348,10 +1348,11 @@ static RISCVException read_mstatus(CPURISCVState *env, int csrno,
 
 static int validate_vm(CPURISCVState *env, target_ulong vm)
 {
+    vm &= 0xf;
     if (riscv_cpu_mxl(env) == MXL_RV32) {
-        return valid_vm_1_10_32[vm & 0xf];
+        return valid_vm_1_10_32[vm] && (RISCV_CPU(env_cpu(env))->cfg.satp_vm & (1 << vm));
     } else {
-        return valid_vm_1_10_64[vm & 0xf];
+        return valid_vm_1_10_64[vm] && (RISCV_CPU(env_cpu(env))->cfg.satp_vm & (1 << vm));
     }
 }
 

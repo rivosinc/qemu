@@ -276,6 +276,10 @@ static void rv64_rivos_sentinel_cpu_init(Object *obj)
     cpu->cfg.pa_mask = (1ULL << 46) - 1;
     cpu->cfg.rcode_ram_mask = ~((1ULL << 21) - 1);
     cpu->cfg.pmp = false;
+    cpu->cfg.satp_mode_sz = 2;
+    cpu->cfg.satp_mode = g_new0(char*, cpu->cfg.satp_mode_sz);
+    cpu->cfg.satp_mode[0] = g_strdup("mbare");
+    cpu->cfg.satp_mode[1] = g_strdup("sv48");
 }
 
 static void rv64_sifive_u_cpu_init(Object *obj)
@@ -934,6 +938,28 @@ static void riscv_cpu_realize(DeviceState *dev, Error **errp)
      }
 #endif
 
+    bool rv32 = riscv_cpu_mxl(&cpu->env) == MXL_RV32;
+    cpu->cfg.satp_vm = cpu->cfg.satp_mode_sz > 0 ? 0 : -1U;
+    for (int i = 0; i < cpu->cfg.satp_mode_sz; i++) {
+        if (!g_strcmp0(cpu->cfg.satp_mode[i], "mbare"))
+            cpu->cfg.satp_vm |= (1 << VM_1_10_MBARE);
+        else if (!g_strcmp0(cpu->cfg.satp_mode[i], "sv32") && rv32)
+            cpu->cfg.satp_vm |= (1 << VM_1_10_SV32);
+        else if (!g_strcmp0(cpu->cfg.satp_mode[i], "sv39") && !rv32)
+            cpu->cfg.satp_vm |= (1 << VM_1_10_SV39);
+        else if (!g_strcmp0(cpu->cfg.satp_mode[i], "sv48") && !rv32)
+            cpu->cfg.satp_vm |= (1 << VM_1_10_SV48);
+        else if (!g_strcmp0(cpu->cfg.satp_mode[i], "sv57") && !rv32)
+            cpu->cfg.satp_vm |= (1 << VM_1_10_SV57);
+        else if (!g_strcmp0(cpu->cfg.satp_mode[i], "sv64") && !rv32)
+            cpu->cfg.satp_vm |= (1 << VM_1_10_SV64);
+        else {
+            error_report("Unknown option for satp_mode: %s",
+                         cpu->cfg.satp_mode[i]);
+            exit(EXIT_FAILURE);
+        }
+    }
+
     riscv_cpu_register_gdb_regs_for_features(cs);
 
     qemu_init_vcpu(cs);
@@ -1132,6 +1158,10 @@ static Property riscv_cpu_properties[] = {
 
     DEFINE_PROP_BOOL("rvv_ta_all_1s", RISCVCPU, cfg.rvv_ta_all_1s, false),
     DEFINE_PROP_BOOL("rvv_ma_all_1s", RISCVCPU, cfg.rvv_ma_all_1s, false),
+
+    DEFINE_PROP_ARRAY("satp-mode", RISCVCPU, cfg.satp_mode_sz, cfg.satp_mode,
+                      qdev_prop_string, char*),
+
     DEFINE_PROP_END_OF_LIST(),
 };
 

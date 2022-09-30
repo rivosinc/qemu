@@ -513,6 +513,10 @@ struct RISCVCPUConfig {
     uint64_t rcode_ram_mask;
 
     bool short_isa_string;
+
+    uint32_t satp_vm;
+    uint32_t satp_mode_sz;
+    char **satp_mode;
 };
 
 typedef struct RISCVCPUConfig RISCVCPUConfig;
