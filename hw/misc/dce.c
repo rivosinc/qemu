@@ -519,7 +519,7 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
         default:
             return -1;
     }
-    if(err) printf("ERROR: %d\n", err);
+    if(err) printf("%s: ERROR: %d\n", __func__, err);
     return err;
 #else  // CONFIG_DCE_COMPRESSION
     return -1;
@@ -688,8 +688,8 @@ static void finish_descriptor(DCEState *state, int WQ_id,
     // printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
 
     //TODO: I think we can do better than pretend it did not happen: Cat2 (or Cat1?)
-    if (ret) printf("ERROR: %x\n", ret);
-    // printf("Processing descriptor with opcode %d\n", descriptor.opcode);
+    if (ret) printf("%s: ERROR: %x\n",__func__, ret);
+    printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
         case DCE_OPCODE_MEMCPY:
