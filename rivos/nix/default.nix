@@ -43,6 +43,7 @@
   libcap,
   libcap_ng,
   socat,
+  lua5_3,
   guestAgentSupport ? with stdenv.hostPlatform; isLinux || isSunOS || isWindows,
   numaSupport ? stdenv.isLinux && !stdenv.isAarch32,
   numactl,
@@ -136,6 +137,7 @@ stdenv.mkDerivation rec {
       gnutls
       nettle
       curl
+      lua5_3
     ]
     ++ lib.optionals ncursesSupport [ncurses]
     ++ lib.optionals seccompSupport [libseccomp]

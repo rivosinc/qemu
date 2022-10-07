@@ -3026,7 +3026,22 @@ if have_libvduse
   libvduse = libvduse_proj.get_variable('libvduse_dep')
 endif
 
-lua = cc.find_library('lua5.3', required: false)
+foreach name : ['lua', 'lua5.3', 'lua-5.3', 'lua53']
+  lua = dependency(name,
+                   version: '>=5.3',
+                   required: false,
+                   method: 'pkg-config')
+  if lua.found()
+    break
+  endif
+endforeach
+
+if not lua.found()
+  if 'CONFIG_LUA_ENGINE' in config_all
+    error('lua not found, but is required by a target')
+  endif
+  lua = not_found
+endif
 
 # NOTE: the trace/ subdirectory needs the qapi_trace_events variable
 # that is filled in by qapi/.
