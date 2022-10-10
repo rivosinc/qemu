@@ -158,8 +158,6 @@ typedef enum {
     rv_codec_css_sqsp,
     rv_codec_k_bs,
     rv_codec_k_rnum,
-    rv_codec_rl,
-    rv_codec_rs,
 } rv_codec;
 
 typedef enum {
@@ -574,6 +572,7 @@ typedef enum {
     rv_op_rsh  = 408,
     rv_op_rsw  = 409,
     rv_op_rsd  = 410,
+    rv_op_rinval_mtt = 411,
 } rv_op;
 
 /* structures */
@@ -1299,17 +1298,18 @@ const rv_opcode_data opcode_data[] = {
     { "xperm4", rv_codec_r, rv_fmt_rd_rs1_rs2, NULL, 0, 0, 0 },
     { "xperm8", rv_codec_r, rv_fmt_rd_rs1, NULL, 0, 0, 0 },
     { "rret", rv_codec_none, rv_fmt_none, NULL, 0, 0, 0 },
-    { "rlb", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rlh", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rlw", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rld", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rlbu", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rlhu", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rlwu", rv_codec_rl, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
-    { "rsb", rv_codec_rs, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
-    { "rsh", rv_codec_rs, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
-    { "rsw", rv_codec_rs, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
-    { "rsd", rv_codec_rs, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
+    { "rlb", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rlh", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rlw", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rld", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rlbu", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rlhu", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rlwu", rv_codec_i, rv_fmt_rd_offset_rs1, NULL, 0, 0, 0 },
+    { "rsb", rv_codec_s, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
+    { "rsh", rv_codec_s, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
+    { "rsw", rv_codec_s, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
+    { "rsd", rv_codec_s, rv_fmt_rs2_offset_rs1, NULL, 0, 0, 0 },
+    { "rinval.mtt", rv_codec_r, rv_fmt_rs1, NULL, 0, 0, 0 },
 };
 
 /* CSR names */
@@ -1686,6 +1686,7 @@ static void decode_inst_opcode(rv_decode *dec, rv_isa isa)
     case 3:
         switch (((inst >> 2) & 0b11111)) {
         case 0:
+            /* RIVOS-2 - Rivos private opcodes */
             switch (((inst >> 12) & 0b111)) {
             case 0: op = rv_op_lb; break;
             case 1: op = rv_op_lh; break;
@@ -1705,32 +1706,22 @@ static void decode_inst_opcode(rv_decode *dec, rv_isa isa)
             }
             break;
         case 2:
-            /* R-code - Rivos private */
+            /* RIVOS-1 - Rivos private opcodes */
             switch (((inst >> 12) & 0b111)) {
-            case 0b000: op = rv_op_rret; break;
-            case 0b100:
-                switch (((inst >> 25) & 0b1)) {
-                case 0:
-                    switch (((inst >> 20) & 0b111111111111)) {
-                    case 0b011000000000: op = rv_op_rlb; break;
-                    case 0b011000000001: op = rv_op_rlbu; break;
-                    case 0b011001000000: op = rv_op_rlh; break;
-                    case 0b011001000001: op = rv_op_rlhu; break;
-                    case 0b011010000000: op = rv_op_rlw; break;
-                    case 0b011010000001: op = rv_op_rlwu; break;
-                    case 0b011011000000: op = rv_op_rld; break;
+            case 0b000:
+                switch ((inst >> 20) & 0b111111111111) {
+                case 0b001100000010:
+                    if (((inst >> 7) & 0b1111100011111) == 0) {
+                        op = rv_op_rret;
                     }
                     break;
-                case 1:
-                    switch (((inst >> 25) & 0b1111111)) {
-                    case 0b0110001: op = rv_op_rsb; break;
-                    case 0b0110011: op = rv_op_rsh; break;
-                    case 0b0110101: op = rv_op_rsw; break;
-                    case 0b0110111: op = rv_op_rsd; break;
-                    }
-                    break;
+                case 0b000101100000: op = rv_op_rinval_mtt; break;
                 }
                 break;
+            case 0b100: op = rv_op_rsb; break;
+            case 0b101: op = rv_op_rsh; break;
+            case 0b110: op = rv_op_rsw; break;
+            case 0b111: op = rv_op_rsd; break;
             }
             break;
         case 3:
@@ -1858,6 +1849,17 @@ static void decode_inst_opcode(rv_decode *dec, rv_isa isa)
             case 2: op = rv_op_fsw; break;
             case 3: op = rv_op_fsd; break;
             case 4: op = rv_op_fsq; break;
+            }
+            break;
+        case 10:
+            switch (((inst >> 12) & 0b111)) {
+            case 0: op = rv_op_rlb; break;
+            case 1: op = rv_op_rlh; break;
+            case 2: op = rv_op_rlw; break;
+            case 3: op = rv_op_rld; break;
+            case 4: op = rv_op_rlbu; break;
+            case 5: op = rv_op_rlhu; break;
+            case 6: op = rv_op_rlwu; break;
             }
             break;
         case 11:
@@ -2900,18 +2902,6 @@ static void decode_inst_operands(rv_decode *dec, rv_isa isa)
         dec->rd = operand_rd(inst);
         dec->rs1 = operand_rs1(inst);
         dec->rnum = operand_rnum(inst);
-        break;
-    case rv_codec_rl:
-        dec->rd = operand_rd(inst);
-        dec->rs1 = operand_rs1(inst);
-        dec->rs2 = rv_ireg_zero;
-        dec->imm = 0;
-        break;
-    case rv_codec_rs:
-        dec->rd = rv_ireg_zero;
-        dec->rs1 = operand_rs1(inst);
-        dec->rs2 = operand_rs2(inst);
-        dec->imm = 0;
         break;
     };
 }

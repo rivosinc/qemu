@@ -16,10 +16,11 @@
 # this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #
-# The field and argument set definitions here are equivalent to ones from
-# insn32.decode, but those can't be used directly from this file - but Since
-# generated sources from all decode files end up included into translate.c,
-# the argument set names need to be unique.
+# The field and argument set definitions here are equivalent to ones
+# from insn32.decode, but those can't be used directly from this file.
+# Since generated sources from _all_ decode files end up included by
+# translate.c, the argument set names need to be unique since they
+# are turned into structs.
 #
 
 # Fields
