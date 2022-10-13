@@ -679,7 +679,7 @@ static void finish_descriptor(DCEState *state, int WQ_id,
     MemTxAttrs transctl_attrs = initialize_pasid_attrs_transctl(state, transctl);
     MemTxResult ret = pci_dma_rw(&state->dev, descriptor_address,
                 &descriptor, 64, DMA_DIRECTION_TO_DEVICE, transctl_attrs);
-
+    // TODO: Error on misaligned completion cat1?
     MemTxAttrs desc_attrs = initialize_pasid_attrs(state, &descriptor);
     bool is_priviledged =
         (FIELD_EX64(transctl, DCE_TRANSCTL ,TRANSCTL_SUPV) == 1);
@@ -687,6 +687,7 @@ static void finish_descriptor(DCEState *state, int WQ_id,
 
     // printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
 
+    //TODO: I think we can do better than pretend it did not happen: Cat2 (or Cat1?)
     if (ret) printf("ERROR: %x\n", ret);
     // printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
@@ -869,6 +870,8 @@ static void process_wqs(DCEState * state) {
             // printf("DSCBA: 0x%lx, DSCSZ: %d, DSCPTA: 0x%lx\n",
             //     WQITEs[i].DSCBA, WQITEs[i].DSCSZ, WQITEs[i].DSCPTA);
             base = WQITEs[i].DSCBA;
+            //TODO: Error if incorrectly aligned: DSCBA, DSCPTA cat2?
+
             /* get the head and tail pointer information */
             // printf("WQITEs[i].TRANSCTL: %d\n", WQITEs[i].TRANSCTL);
             MemTxAttrs attrs =
@@ -880,13 +883,18 @@ static void process_wqs(DCEState * state) {
                 WQITEs[i].DSCPTA + RING_HEADER_TAIL_OFFSET,
                 &tail, 8, DMA_DIRECTION_TO_DEVICE, attrs);
             /* keep processing until we catch up */
+            // Generate mask to get buf pos from index
+            // Should be 6+DSCSZ bits
+            // 4096B pqges, 64B per descriptor, 6 bit for page indexing
+            // DSCSZ bits for page indexing inside the queue
+            const uint64_t head_mask = (1<<(6+WQITEs[i].DSCSZ))-1;
             while (head < tail) {
-                //FIXME: Use WQITE.DSCSZ
-                head_mod = head %= 64;
+                head_mod = head & head_mask;
                 dma_addr_t descriptor_addr = base +
                     (head_mod * sizeof(DCEDescriptor));
                 // printf("processing descriptor 0x%lx\n", descriptor_addr);
                 /* Actually process the descriptor */
+                printf("Job queue %d: Starting job at index %"PRIx64"\n", i, head_mod);
                 finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
                 //TODO: Update head on job completion?
