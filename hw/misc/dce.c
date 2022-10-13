@@ -1025,7 +1025,7 @@ static void dce_realize(PCIDevice *dev, Error **errp)
     memset(state->regs_ro, 0x00, DCE_PAGE_SIZE);
 
     /* WQCR pages, mark NOTIFY / ABORT as RW */
-    for (int i = 1; i <= 64; i++) {
+    for (int i = 1; i <= NUM_WQ; i++) {
         stw_le_p(&state->regs_ro[i][DCE_REG_WQCR], 0);
     }
 
