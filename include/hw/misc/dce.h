@@ -54,6 +54,9 @@ typedef struct InterruptSourceInfo {
 // #define DCE_DESCRIPTOR_RING_OFFSET_HEAD  16
 // #define DCE_DESCRIPTOR_RING_OFFSET_TAIL  24
 
+static const int RING_HEADER_HEAD_OFFSET = 0;
+static const int RING_HEADER_TAIL_OFFSET = 64;
+
 typedef struct DCEDescriptor {
     uint8_t  opcode;
     uint8_t  ctrl;

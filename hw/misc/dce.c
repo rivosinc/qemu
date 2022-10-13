@@ -873,19 +873,23 @@ static void process_wqs(DCEState * state) {
             // printf("WQITEs[i].TRANSCTL: %d\n", WQITEs[i].TRANSCTL);
             MemTxAttrs attrs =
                 initialize_pasid_attrs_transctl(state, WQITEs[i].TRANSCTL);
-            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
+            pci_dma_rw(&state->dev,
+                WQITEs[i].DSCPTA + RING_HEADER_HEAD_OFFSET,
                 &head, 8, DMA_DIRECTION_TO_DEVICE, attrs);
-            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA + 8,
+            pci_dma_rw(&state->dev,
+                WQITEs[i].DSCPTA + RING_HEADER_TAIL_OFFSET,
                 &tail, 8, DMA_DIRECTION_TO_DEVICE, attrs);
             /* keep processing until we catch up */
             while (head < tail) {
+                //FIXME: Use WQITE.DSCSZ
                 head_mod = head %= 64;
                 dma_addr_t descriptor_addr = base +
                     (head_mod * sizeof(DCEDescriptor));
                 // printf("processing descriptor 0x%lx\n", descriptor_addr);
-                /* Atually process the descriptor */
+                /* Actually process the descriptor */
                 finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
+                //TODO: Update head on job completion?
             }
             pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
                 &head, 8, DMA_DIRECTION_FROM_DEVICE, attrs);
