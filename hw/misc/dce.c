@@ -529,6 +529,134 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
 #endif // CONFIG_DCE_COMPRESSION
 }
 
+static void reflect(uint8_t * buffer, size_t size) {
+    for (int i = 0; i < size; i ++) {
+        uint8_t b = buffer[i];
+        /*
+         * bit 7 is swapped with bit 0
+         * bit 6 is swapped with bit 1
+         * bit 5 is swapped with bit 2
+         * bit 4 is swapped with bit 3
+         */
+        b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+        b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+        b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+    }
+}
+
+/* CRC specific, move to a seperate file ? */
+
+// Mode can be one of followings;
+#define CRC8 0
+#define CRC16 1
+#define CRC24 2
+#define CRC32 3
+#define CRC40 4
+#define CRC64 7
+
+uint64_t const Mask[8] = { 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0, 0, 0xFFFFFFFFFFFFFFFF };
+uint64_t const Msbcheck[8] = { 0x80, 0x8000, 0x800000, 0x80000000, 0x8000000000, 0, 0, 0x8000000000000000 };
+uint8_t const Shifter[8] = { 0, 8, 16, 24, 32, 0, 0, 56 };
+
+static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Width)
+{
+    uint64_t index;
+    uint64_t value;
+    uint8_t cnt;
+    uint8_t mode = Width / 8 - 1;
+
+    for (index = 0; index < 256; index++)
+    {
+        value = ((index << Shifter[mode]) & Mask[mode]);
+        cnt = 8;
+        while (cnt--)
+        {
+            value = ((value & Msbcheck[mode]) == 0) ? (value << 1) : (value << 1) ^ Polynomial;
+            value &= Mask[mode];
+        }
+        CrcTable[index] = value;
+    }
+}
+
+static uint64_t CalculateCRC(uint8_t* Buffer, uint64_t Length, uint64_t* CrcTable,
+                      uint8_t Width, uint64_t initValue, uint64_t XORout)
+{
+    uint64_t crc = initValue;
+    uint8_t mode = Width / 8 - 1;
+    uint8_t index;
+    while (Length--)
+    {
+        index = (uint8_t)((crc >> Shifter[mode]) ^ *Buffer++);
+        crc = (mode == CRC8) ? (CrcTable[index]) : ((crc << 8) ^ CrcTable[index]);
+    }
+    return ((crc ^ XORout) & Mask[mode]);
+}
+
+static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
+                                MemTxAttrs * attrs)
+
+{
+    /* TODO: add error */
+    /* parse from the descriptor */
+    uint16_t crc_ctl = descriptor->operand0;
+    uint64_t polynomial = descriptor->operand1;
+    uint64_t init_value = descriptor->operand2;
+    uint64_t xor_value = descriptor->operand3;
+    uint64_t job_control = descriptor->operand4;
+
+    int err = 0;
+
+    hwaddr dest = descriptor->dest;
+    hwaddr src = descriptor->source;
+
+    /* extract fields */
+    uint64_t width = FIELD_EX64(crc_ctl, CRC_CTRL, WIDTH) + 1;
+    bool reflect_in = FIELD_EX64(crc_ctl, CRC_CTRL, REFLECT_IN);
+    bool reflect_out = FIELD_EX64(crc_ctl, CRC_CTRL, REFLECT_OUT);
+    uint64_t pad = FIELD_EX64(crc_ctl, CRC_CTRL, PAD_BIT);
+    polynomial &= ((1 << width) - 1);
+    size_t size = FIELD_EX64(job_control, JOB_CTRL, NUM_BYTES);
+    size_t size_adjusted = (size % width == 0)
+                            ? size
+                            : (size + (width - (size % width)));
+
+    /* Pad zeros if needed */
+    uint8_t * src_local = calloc(size_adjusted, 1);
+    bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
+
+    err |= local_buffer_transfer(state, (uint8_t *)src_local, src,
+                        size, src_is_list, TO_LOCAL, attrs);
+
+
+    /* Reflect input if specified */
+    if (reflect_in)
+        reflect(src_local, size);
+
+    uint64_t crc_table[256];
+    /* Fill up the CRC table */
+    CreateCRCtable(crc_table, polynomial, width);
+    uint64_t crc =
+        CalculateCRC(src_local, size_adjusted, crc_table, width, init_value, xor_value);
+
+    /* Reflect output if specified */
+    if (reflect_out)
+        reflect(&crc, 8);
+
+    /* perform the memcpy if using opcode DCE_OPCODE_MEMCPY_CRC_GEN */
+    if (descriptor->opcode == DCE_OPCODE_MEMCPY_CRC_GEN) {
+        bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
+        hwaddr dest = descriptor->dest;
+        err |= local_buffer_transfer(state, src_local, dest,
+                            size, dest_is_list, FROM_LOCAL, attrs);
+    }
+
+    complete_workload(state, descriptor, err, 0, size_adjusted, attrs);
+    /* write the CRC into completion */
+    if (!err)
+        pci_dma_rw(&state->dev, descriptor->completion + 8,
+        &crc, 8, DMA_DIRECTION_FROM_DEVICE, *attrs);
+}
+
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
                                 MemTxAttrs * attrs)
 {
@@ -712,6 +840,9 @@ static void finish_descriptor(DCEState *state, int WQ_id,
             dce_load_key(state, &descriptor, attrs_to_use); break;
         case DCE_OPCODE_CLEAR_KEY:
             dce_clear_key(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_CRC_GEN:
+        case DCE_OPCODE_MEMCPY_CRC_GEN:
+            dce_crc(state, &descriptor, attrs_to_use); break;
     }
     /* interupt only in priviledged mode */
     if (interrupt_on_completion(state, &descriptor) && is_priviledged)
