@@ -72,3 +72,19 @@ package-deb:
 # Rebuild the rivos-sdk where we are exporting the artifacts built here.
 update-sdk:
   extends: .update-sdk
+
+nix-build:
+  stage: build
+  image: nixos/nix
+  variables:
+    NIX_CONFIG: |
+      experimental-features = nix-command flakes
+      max-jobs = 8
+      cores = 32
+  script:
+    - nix build '.?submodules=1#qemu' '.?submodules=1#qemu.plugins'
+    - nix-store --export $(nix-store -qR result*) > nix_closure.mnar
+  artifacts:
+    paths:
+      - nix_closure.mnar
+    expire_in: 12h
