@@ -89,8 +89,16 @@ typedef struct DCEDescriptor {
 #define DCE_OPCODE_DECRYPT            9
 #define DCE_OPCODE_DECRYPT_DECOMPRESS 10
 #define DCE_OPCODE_COMPRESS_ENCRYPT   11
+/* CRC Opcodes */
 #define DCE_OPCODE_CRC_GEN            12
 #define DCE_OPCODE_MEMCPY_CRC_GEN     13
+/* PI Opcodes */
+#define DCE_OPCODE_DIF_CHK            14
+#define DCE_OPCODE_DIF_GEN            15
+#define DCE_OPCODE_DIF_UPD            16
+#define DCE_OPCODE_DIF_STRP           17
+#define DCE_OPCODE_DIX_CHK            18
+#define DCE_OPCODE_DIX_GEN            19
 
 #ifdef CONFIG_DCE_CRYPTO
 /* OPERAND 0 for Security/Efficiency */
@@ -193,6 +201,37 @@ REG64(DCE_TRANSCTL, 0)
 #define DCE_REG_KEY_SLOT_OWNERSHIP      0x50 /* 0x50 - 0x60 */
 #define DCE_REG_FUNC_WQ_PROCESSING_CTL  0x60
 #define DCE_REG_FUNC_WQ_RUN_STS         0x68 /* 0x68 - 0x78 */
+
+typedef enum {
+    _16GB = 0,
+    _32GB = 1,
+    _64GB = 2,
+    PIF_RESERVED = 3,
+} PIF_encoding;
+
+typedef enum {
+    TYPE_1,
+    TYPE_2,
+    TYPE_3,
+    TYPE_4,
+} Protection_type;
+
+typedef enum {
+    NO_PI_ERROR,
+    INVALID_PI_DESCRIPTOR,
+    INVALID_PI,
+    GUARD_CHECK_FAILED,
+    APPLICATION_TAG_CHECK_FAILED,
+    STORAGE_TAG_CHECK_FAILED,
+    REFERENCE_TAG_CHECK_FAILED,
+} PI_error_codes;
+
+/* PI fields */
+REG16(FMT_INFO, 0)
+    FIELD(FMT_INFO, _LBAS, 14, 2)
+    FIELD(FMT_INFO, _PIF, 12, 2)
+    FIELD(FMT_INFO, _ATS, 7, 5)
+    FIELD(FMT_INFO, _STS, 0, 7)
 
 /* CRC fields */
 REG16(CRC_CTRL, 0)

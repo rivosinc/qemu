@@ -10,6 +10,7 @@
 #include "hw/misc/dce.h"
 #include "qemu/atomic.h"
 #include <signal.h>
+#include <stdint.h>
 // #include "hw/riscv/riscv_hart.h" FIXME
 #define DCE_PAGE_SIZE  (1 << 12)
 
@@ -610,18 +611,22 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     hwaddr src = descriptor->source;
 
     /* extract fields */
-    uint64_t width = FIELD_EX64(crc_ctl, CRC_CTRL, WIDTH) + 1;
-    bool reflect_in = FIELD_EX64(crc_ctl, CRC_CTRL, REFLECT_IN);
-    bool reflect_out = FIELD_EX64(crc_ctl, CRC_CTRL, REFLECT_OUT);
-    uint64_t pad = FIELD_EX64(crc_ctl, CRC_CTRL, PAD_BIT);
+    uint64_t width = FIELD_EX16(crc_ctl, CRC_CTRL, WIDTH) + 1;
+    bool reflect_in = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_IN);
+    bool reflect_out = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_OUT);
+    uint8_t pad = FIELD_EX16(crc_ctl, CRC_CTRL, PAD_BIT);
+    pad = pad ? 0xf : 0x0;
     polynomial &= ((1 << width) - 1);
-    size_t size = FIELD_EX64(job_control, JOB_CTRL, NUM_BYTES);
+    size_t size = FIELD_EX16(job_control, JOB_CTRL, NUM_BYTES);
     size_t size_adjusted = (size % width == 0)
                             ? size
                             : (size + (width - (size % width)));
 
     /* Pad zeros if needed */
-    uint8_t * src_local = calloc(size_adjusted, 1);
+    uint8_t * src_local = malloc(size_adjusted);
+    if (size_adjusted > size)
+        /* Pad if needed */
+        memset(src_local + size, pad, size_adjusted - size);
     bool src_is_list = (descriptor->ctrl & SRC_IS_LIST) ? true : false;
 
     err |= local_buffer_transfer(state, (uint8_t *)src_local, src,
@@ -640,12 +645,11 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
 
     /* Reflect output if specified */
     if (reflect_out)
-        reflect(&crc, 8);
+        reflect((uint8_t *)&crc, 8);
 
     /* perform the memcpy if using opcode DCE_OPCODE_MEMCPY_CRC_GEN */
     if (descriptor->opcode == DCE_OPCODE_MEMCPY_CRC_GEN) {
         bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
-        hwaddr dest = descriptor->dest;
         err |= local_buffer_transfer(state, src_local, dest,
                             size, dest_is_list, FROM_LOCAL, attrs);
     }
@@ -655,6 +659,343 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     if (!err)
         pci_dma_rw(&state->dev, descriptor->completion + 8,
         &crc, 8, DMA_DIRECTION_FROM_DEVICE, *attrs);
+}
+
+#define MAKE128CONST(hi,lo) ((((__uint128_t)hi << 64) | lo))
+
+static uint64_t extract_bytes(uint8_t * reg, int lo, int hi) {
+    uint64_t result = 0;
+    int shift = 0;
+    for (int curr = hi; curr >= lo; curr--) {
+        result += (reg[curr] << shift);
+        shift += 8;
+    }
+    return result;
+}
+
+static uint64_t extract_at(uint8_t * pi, PIF_encoding PIF, uint64_t at_mask){
+    uint64_t ret = 0;
+    switch(PIF) {
+        case _16GB:
+            // at = extract_bytes(pi, 2, 3)
+            ret = extract_bytes(pi, 2, 3);
+            break;
+        case _32GB:
+            // at = extract_bytes(pi, 4, 5)
+            ret = extract_bytes(pi, 4, 5);
+            break;
+        case _64GB:
+            // at = extract_bytes(pi, 8, 9)
+            ret = extract_bytes(pi, 8, 9);
+            break;
+        default:
+            break;
+    }
+    return (ret & at_mask);
+}
+
+static __uint128_t extract_strt(uint8_t * pi, PIF_encoding PIF,
+                                    __uint128_t st_rt_mask){
+    __uint128_t ret = 0;
+    uint64_t ret_lo = 0;
+    uint64_t ret_hi = 0;
+    switch(PIF) {
+        case _16GB:
+            // st = extract_bytes(pi, 4, 7)
+            ret_lo = extract_bytes(pi, 4, 7);
+            break;
+        case _32GB:
+            // st = extract_bytes(pi, 6, 15)
+            ret_lo = extract_bytes(pi, 8, 15);
+            ret_hi = extract_bytes(pi, 6, 7);
+            break;
+        case _64GB:
+            // st = extract_bytes(pi, 10, 15)
+            ret_lo = extract_bytes(pi, 10, 15);
+            break;
+        default:
+            break;
+    }
+    ret = MAKE128CONST(ret_hi, ret_lo);
+    return (ret & st_rt_mask);
+}
+
+static uint64_t extract_guard(uint8_t * pi, PIF_encoding PIF) {
+    uint64_t ret = 0;
+    switch(PIF) {
+        case _16GB:
+            ret = extract_bytes(pi, 0, 1);
+            break;
+        case _32GB:
+            ret = extract_bytes(pi, 0, 3);
+            break;
+        case _64GB:
+            ret = extract_bytes(pi, 0, 7);
+            break;
+        default:
+            break;
+    }
+    return ret;
+}
+
+static void insert_bytes(uint8_t * buffer, int lo, int hi, uint8_t * src) {
+    for (int index = lo; index <= hi; index++) {
+        buffer[index] = *src;
+        src++;
+    }
+}
+
+static void form_pi(uint8_t * pi, PIF_encoding PIF, uint64_t guard, uint64_t at,
+                         __uint128_t st, __uint128_t rt) {
+    __uint128_t st_rt = st | rt;
+    switch(PIF) {
+        case _16GB:
+            insert_bytes(pi, 0, 1, (uint8_t *)&guard);
+            insert_bytes(pi, 2, 3, (uint8_t *)&at);
+            insert_bytes(pi, 4, 7, (uint8_t *)&st_rt);
+            break;
+        case _32GB:
+            insert_bytes(pi, 0, 3, (uint8_t *)&guard);
+            insert_bytes(pi, 4, 5, (uint8_t *)&at);
+            insert_bytes(pi, 6, 16, (uint8_t *)&st_rt);
+            break;
+        case _64GB:
+            insert_bytes(pi, 0, 7, (uint8_t *)&guard);
+            insert_bytes(pi, 8, 9, (uint8_t *)&at);
+            insert_bytes(pi, 10, 15, (uint8_t *)&st_rt);
+            break;
+        default:
+            break;
+    }
+}
+
+static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
+                                MemTxAttrs * attrs)
+{
+    uint16_t fmt_info = descriptor->operand0;
+    uint16_t STS = FIELD_EX16(fmt_info, FMT_INFO, _STS);
+    uint16_t ATS = FIELD_EX16(fmt_info, FMT_INFO, _ATS);
+    uint16_t PIF = FIELD_EX16(fmt_info, FMT_INFO, _PIF);
+    uint16_t LBAS = FIELD_EX16(fmt_info, FMT_INFO, _LBAS);
+    uint64_t src_pi_hi = descriptor->operand2;
+    uint64_t src_pi_lo = descriptor->operand1;
+    uint64_t dst_pi_hi = descriptor->operand4;
+    uint64_t dst_pi_lo = descriptor->operand3;
+    uint8_t opcode = descriptor->opcode;
+
+    dma_addr_t bfr1 = descriptor->source;
+    dma_addr_t bfr2 = descriptor->dest;
+
+    __uint128_t src_pi_ctl =
+        MAKE128CONST(src_pi_hi, src_pi_lo);
+    __uint128_t dst_pi_ctl =
+        MAKE128CONST(dst_pi_hi, dst_pi_lo);
+
+    uint8_t GVC = extract64(src_pi_hi, 32, 1);
+    uint8_t ATC = extract64(src_pi_hi, 33, 1);
+    uint8_t PRC = extract64(src_pi_hi, 34, 1);
+    uint8_t STC = extract64(src_pi_hi, 35, 1);
+    uint8_t A1E = extract64(src_pi_hi, 36, 1);
+
+    uint8_t ATI = extract64(dst_pi_hi, 32, 1);
+    uint8_t PRI = extract64(dst_pi_hi, 33, 1);
+    uint8_t STI = extract64(dst_pi_hi, 34, 1);
+    uint64_t dst_reserved = extract64(dst_pi_hi, 35, 6);
+
+    Protection_type PT = extract64(src_pi_hi, 46, 2);
+
+    PI_error_codes err = NO_PI_ERROR;
+
+    if (((LBAS != 0) && (LBAS != 1)) ||
+        (PIF == PIF_RESERVED) ||
+        (ATS > 16) ||
+        ((PIF == _16GB) && (STS > 32)) ||
+        ((PIF == _32GB) && (STS < 16 || STS > 64)) ||
+        ((PIF == _64GB) && (STS > 48)) ||
+        (dst_reserved != 0) ||
+        ((ATC == 1) && (ATS == 0)) ||
+        ((STC == 1) && (STS == 0)) ||
+        ((PRC == 1) && (STS == 32) && (PIF == _16GB)) ||
+        ((PRC == 1) && (ATS == 64) && (PIF == _32GB)) ||
+        ((PRC == 1) && (ATS == 48) && (PIF == _64GB)) ||
+        ((ATI == 1) && (ATS == 0)) ||
+        ((STI == 1) && (STS == 0)) ||
+        ((PRI == 1) && (STS == 32) && (PIF == _16GB)) ||
+        ((PRI == 1) && (ATS == 64) && (PIF == _32GB)) ||
+        ((PRI == 1) && (ATS == 48) && (PIF == _64GB))) {
+        err = INVALID_PI_DESCRIPTOR;
+        goto finish_pi;
+    }
+
+    size_t block_size = (LBAS == 0) ? 512 : 4096;
+    __uint128_t _96bitmask = MAKE128CONST(0xffffffff, 0xFFFFFFFFFFFFFFFF);
+
+    uint64_t crc_poly, pi_size, at_mask;
+    __uint128_t ref_tag_mask, st_tag_mask;
+    uint8_t crc_width = 0;
+
+    if (PIF == _16GB) {
+        crc_poly = 0x18BB7;
+        pi_size = 8;
+        ref_tag_mask = (STS == 32) ? 0 : ((1 << (32 - STS)) - 1);
+        st_tag_mask = 0xFFFFFFFF ^ ref_tag_mask;
+        at_mask = (1 << ATS) - 1;
+        crc_width = 16;
+    } else if (PIF == _32GB) {
+        crc_poly = 0x1EDC6F41;
+        pi_size = 16;
+        ref_tag_mask = (STS == 64) ? 0 : ((1 << (64 - STS)) - 1);
+        st_tag_mask = _96bitmask ^ ref_tag_mask;
+        at_mask = (1 << ATS) - 1;
+        crc_width = 32;
+    } else if (PIF == _64GB) {
+        crc_poly = 0xAD93D23594C93659ULL;
+        pi_size = 16;
+        ref_tag_mask = (STS == 48) ? 0 : ((1 << (48 - STS)) - 1);
+        st_tag_mask = 0xFFFFFFFFFFFF ^ ref_tag_mask;
+        at_mask = (1 << ATS) - 1;
+        crc_width = 64;
+    }
+
+    uint64_t crc_table[256];
+    /* Fill up the CRC table TODO: figureing out the width*/
+    CreateCRCtable(crc_table, crc_poly, crc_width);
+
+    __uint128_t exp_st, exp_rt, dst_st, dst_rt, st, rt;
+    uint16_t exp_at, dst_at, at, num_lbas;
+
+    // exp_at = src_pi_ctl.ELBAT & at_mask
+    exp_at = extract64(src_pi_hi, 48, 16);
+    exp_at &= at_mask;
+    // exp_st = src_pi_ctl[95:0] & st_tag_mask
+    exp_st = src_pi_ctl & st_tag_mask;
+    // exp_rt = src_pi_ctl[95:0] & ref_tag_mask
+    exp_rt = src_pi_ctl & ref_tag_mask;
+    // dst_at = dst_pi_ctl.LBAT & at_mask
+    dst_at = extract64(dst_pi_hi, 48, 16);
+    dst_at &= at_mask;
+    // dst_st = dst_pi_ctl[95:0] & st_tag_mask
+    dst_st = dst_pi_ctl & st_tag_mask;
+    // dst_rt = dst_pi_ctl[95:0] & ref_tag_mask
+    dst_rt = dst_pi_ctl & ref_tag_mask;
+    // num_lbas = (dst_pi_ctl.num_lba[15:9] << 9)
+    // num_lbas |= src_pi_ctl.num_lba[8:0]
+    num_lbas = (extract64(dst_pi_hi, 37, 9) << 9) + extract64(src_pi_hi, 37, 9);
+
+    uint8_t * data = malloc(block_size);
+    uint8_t * source_pi = malloc(pi_size);
+    uint8_t * dst_pi = malloc(pi_size);
+    uint64_t source_crc, source_at, source_guard;
+    __uint128_t source_st, source_rt;
+    bool skip_checks = false;;
+    int num_lba_processed;
+
+    for (num_lba_processed = 0; num_lba_processed < num_lbas; num_lba_processed++) {
+        pci_dma_rw(&state->dev, bfr1, data, block_size,
+                DMA_DIRECTION_TO_DEVICE, *attrs);
+        bfr1 += block_size;
+        if (opcode == DCE_OPCODE_DIF_CHK ||
+            opcode == DCE_OPCODE_DIF_UPD ||
+            opcode == DCE_OPCODE_DIF_STRP) {
+            pci_dma_rw(&state->dev, bfr1, source_pi, pi_size,
+                DMA_DIRECTION_TO_DEVICE, *attrs);
+            bfr1 += pi_size;
+        }
+        if (opcode == DCE_OPCODE_DIX_CHK) {
+            pci_dma_rw(&state->dev, bfr2, source_pi, pi_size,
+                DMA_DIRECTION_TO_DEVICE, *attrs);
+            bfr2 += pi_size;
+        }
+        source_crc = CalculateCRC(data, block_size, crc_table, crc_width, 0, 0);
+        // f. If opcode == dif_chk || opcode == dif_upd || opcode == dif_strp || dix_chk
+        if (opcode == DCE_OPCODE_DIF_CHK ||
+            opcode == DCE_OPCODE_DIF_UPD ||
+            opcode == DCE_OPCODE_DIX_CHK ||
+            opcode == DCE_OPCODE_DIF_STRP) {
+            source_at = extract_at(source_pi, PIF, at_mask);
+            source_st = extract_strt(source_pi, PIF, st_tag_mask);
+            source_rt = extract_strt(source_pi, PIF, ref_tag_mask);
+            source_guard = extract_guard(source_pi, PIF);
+            // If (source_at == all 1’s && PT != TYPE3) ||
+            // (source_at == all 1’s && source_rt == all 1’s && PT == TYPE3)
+            // skip_checks = 1
+            if (((source_at = at_mask) && (PT != TYPE_3)) ||
+                ((source_at = at_mask) && (source_rt == ref_tag_mask &&
+                (PT == TYPE_3)))) {
+                skip_checks = true;
+            }
+            // If skip_checks && src_pi_ctl.A1E == 1
+            if (skip_checks && (A1E == 1)) {
+                // Cause = “Invalid PI”
+                err = INVALID_PI;
+                goto clean_up_and_finish_pi;
+            }
+            // if src_pi_ctl.GVC == 1 && skip_checks == 0
+            if (!skip_checks && (GVC == 1)) {
+                if (source_crc != source_guard) {
+                    err = GUARD_CHECK_FAILED;
+                    goto clean_up_and_finish_pi;
+                }
+            }
+            // if src_pi_ctl.ATC == 1 && skip_checks == 0
+            if (!skip_checks && (ATC == 1)) {
+                if (source_at != exp_at) {
+                    err = APPLICATION_TAG_CHECK_FAILED;
+                    goto clean_up_and_finish_pi;
+                }
+            }
+            // if src_pi_ctl.PRC == 1 && skip_checks == 0
+            if (!skip_checks && (PRC == 1)) {
+                if (source_rt != exp_rt) {
+                    err = REFERENCE_TAG_CHECK_FAILED;
+                    goto clean_up_and_finish_pi;
+                }
+            }
+            // if src_pi_ctl.STC == 1 && skip_checks == 0
+            if (!skip_checks && (STC == 1)) {
+                if (source_st != exp_st) {
+                    err = STORAGE_TAG_CHECK_FAILED;
+                    goto clean_up_and_finish_pi;
+                }
+            }
+            if (!skip_checks) {
+                exp_rt = (exp_rt + 1) & ref_tag_mask;
+            }
+        }
+        // g. If opcode == dif_strp || opcode == dif_upd || op == dif_gen
+        if (opcode == DCE_OPCODE_DIF_GEN ||
+            opcode == DCE_OPCODE_DIF_UPD ||
+            opcode == DCE_OPCODE_DIF_STRP) {
+            pci_dma_rw(&state->dev, bfr2, data, block_size,
+                DMA_DIRECTION_FROM_DEVICE, *attrs);
+            bfr2 += pi_size;
+        }
+        // h. If opcode == dif_upd || opcode == dif_gen || opcode == dix_gen
+        if (opcode == DCE_OPCODE_DIF_GEN ||
+            opcode == DCE_OPCODE_DIF_UPD ||
+            opcode == DCE_OPCODE_DIX_GEN) {
+            source_guard = source_crc;
+            at = ATI ? dst_at : exp_at;
+            rt = PRI ? dst_rt : exp_rt;
+            st = STI ? dst_st : exp_st;
+            form_pi(dst_pi, PIF, source_guard, at, st, rt);
+            // write(desc.bfr2, pi_size, dst_pi);
+            pci_dma_rw(&state->dev, bfr2, dst_pi, pi_size,
+                DMA_DIRECTION_FROM_DEVICE, *attrs);
+            bfr2 += pi_size;
+            dst_rt = (dst_rt + 1) & ref_tag_mask;
+        }
+    }
+clean_up_and_finish_pi:
+    /* free the memories we have allocated */
+    free(data);
+    free(source_pi);
+    free(dst_pi);
+finish_pi:
+    /* populate the completion */
+    complete_workload(state, descriptor, err, 0,
+        num_lba_processed * block_size, attrs);
+
 }
 
 static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
