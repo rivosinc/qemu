@@ -806,6 +806,10 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
 
     PI_error_codes err = NO_PI_ERROR;
 
+    /* initialize the variables used for completion early */
+    size_t block_size = (LBAS == 0) ? 512 : 4096;
+    int num_lba_processed = 0;
+
     if (((LBAS != 0) && (LBAS != 1)) ||
         (PIF == PIF_RESERVED) ||
         (ATS > 16) ||
@@ -827,7 +831,6 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
         goto finish_pi;
     }
 
-    size_t block_size = (LBAS == 0) ? 512 : 4096;
     __uint128_t _96bitmask = MAKE128CONST(0xffffffff, 0xFFFFFFFFFFFFFFFF);
 
     uint64_t crc_poly, pi_size, at_mask;
@@ -887,8 +890,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     uint8_t * dst_pi = malloc(pi_size);
     uint64_t source_crc, source_at, source_guard;
     __uint128_t source_st, source_rt;
-    bool skip_checks = false;;
-    int num_lba_processed;
+    bool skip_checks = false;
 
     for (num_lba_processed = 0; num_lba_processed < num_lbas; num_lba_processed++) {
         pci_dma_rw(&state->dev, bfr1, data, block_size,
