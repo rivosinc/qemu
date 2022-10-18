@@ -1184,6 +1184,13 @@ static void finish_descriptor(DCEState *state, int WQ_id,
         case DCE_OPCODE_CRC_GEN:
         case DCE_OPCODE_MEMCPY_CRC_GEN:
             dce_crc(state, &descriptor, attrs_to_use); break;
+        case DCE_OPCODE_DIF_CHK:
+        case DCE_OPCODE_DIF_GEN:
+        case DCE_OPCODE_DIF_UPD:
+        case DCE_OPCODE_DIF_STRP:
+        case DCE_OPCODE_DIX_CHK:
+        case DCE_OPCODE_DIX_GEN:
+            dce_pi(state, &descriptor, attrs_to_use); break;
     }
     /* interupt only in priviledged mode */
     if (interrupt_on_completion(state, &descriptor) && is_priviledged)
