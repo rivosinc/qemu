@@ -85,6 +85,7 @@ nix-build:
     - nix build '.?submodules=1#qemu' '.?submodules=1#qemu.plugins'
     - nix-store --export $(nix-store -qR result*) > nix_closure.mnar
   artifacts:
+    name: nix_closure
     paths:
       - nix_closure.mnar
     expire_in: 12h
