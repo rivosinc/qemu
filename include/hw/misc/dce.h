@@ -211,9 +211,9 @@ typedef enum {
 
 typedef enum {
     TYPE_1,
+    TYPE_1_alt,
     TYPE_2,
     TYPE_3,
-    TYPE_4,
 } Protection_type;
 
 typedef enum {
