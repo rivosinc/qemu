@@ -264,16 +264,18 @@ static void rv64_rivos_sentinel_cpu_init(Object *obj)
     CPURISCVState *env = &cpu->env;
     set_misa(env, MXL_RV64, RVI | RVM | RVA | RVF | RVD | RVC | RVV |
                             RVH | RVS | RVU);
+
+    /* Continue supporting command-line CPU customization for now */
+    register_cpu_props(DEVICE(obj));
+
     set_priv_version(env, PRIV_VERSION_1_12_0);
     set_vext_version(env, VEXT_VERSION_1_00_0);
+
     cpu->cfg.vlen = 256;
     cpu->cfg.elen = 64;
     cpu->cfg.pa_mask = (1ULL << 46) - 1;
     cpu->cfg.rcode_ram_mask = ~((1ULL << 21) - 1);
     cpu->cfg.pmp = false;
-
-    /* Continue supporting command-line CPU customization for now */
-    register_cpu_props(DEVICE(obj));
 }
 
 static void rv64_sifive_u_cpu_init(Object *obj)
