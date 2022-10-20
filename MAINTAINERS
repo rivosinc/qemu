@@ -1485,6 +1485,14 @@ S: Supported
 F: hw/*/*sifive*.c
 F: include/hw/*/*sifive*.h
 
+RISC-V IOMMU
+M: Tomasz Jeznach <tjeznach@rivosinc.com>
+M: Palmer Dabbelt <palmer@dabbelt.com>
+L: qemu-riscv@nongnu.org
+S: Supported
+F: hw/riscv/riscv_iommu.c
+F: include/hw/riscv/riscv_iommu.h
+
 RX Machines
 -----------
 rx-gdbsim
