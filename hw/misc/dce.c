@@ -1603,6 +1603,10 @@ static void dcevf_realize(PCIDevice *dev, Error **errp)
     if (ret < 0) {
         printf("VF error: cap\n");
     }
+    ret = msi_init(&vfstate->dev, 0, 1, true, false, errp);
+    if (ret != 0) {
+        printf("MSI INIT FAILED\n");
+    }
     pcie_ari_init(dev, 0x100, 1);
 
     qemu_cond_init(&vfstate->core_cond);
