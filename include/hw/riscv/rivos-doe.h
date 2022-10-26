@@ -29,7 +29,7 @@ typedef struct RivosDOE RivosDOE;
 #define DOE_CLIENT_INTERRUPT (1 << 0)
 #define DOE_ASYNC_MESSAGES   (1 << 1)
 
-RivosDOE *rivos_doe_create(Object *parent, uint32_t options);
+RivosDOE *rivos_doe_create(Object *parent, uint32_t next_cap);
 void rivos_doe_realize(RivosDOE *doe, AddressSpace *as);
 void rivos_doe_reset(RivosDOE *doe);
 MemoryRegion *rivos_doe_get_mr(RivosDOE *doe, bool host_regs);

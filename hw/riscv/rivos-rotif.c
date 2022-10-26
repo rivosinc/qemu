@@ -28,16 +28,15 @@
 #include "hw/registerfields.h"
 #include "hw/irq.h"
 
-#define ROTIF_DOE_OFFSET    0x028
-#define ROTIF_RLRAM_OFFSET  0x400
+#define ROTIF_DOE_OFFSET    0x080
+#define ROTIF_RLRAM_OFFSET  0x800
 #define ROTIF_RLRAM_SIZE    0x400
 
 #define ROTIF_COUNT_MAX     1024
 
 #define ROTIF_NUM_COUNTERS        8
 #define ROTIF_NUM_SEMAPHORES      2
-#define ROTIF_NUM_SCRATCH         9
-#define ROTIF_NUM_RAM_BYTES       1024
+#define ROTIF_NUM_SCRATCH         8
 
 REG32(COUNTER0, 0x00)
 REG32(COUNTER1, 0x04)
@@ -51,15 +50,14 @@ REG32(COUNTER7, 0x1C)
 REG32(SEM0, 0x20)
 REG32(SEM1, 0x24)
 
-REG32(SCRATCH0, 0x38)
-REG32(SCRATCH1, 0x40)
-REG32(SCRATCH2, 0x48)
-REG32(SCRATCH3, 0x50)
-REG32(SCRATCH4, 0x58)
-REG32(SCRATCH5, 0x60)
-REG32(SCRATCH6, 0x68)
-REG32(SCRATCH7, 0x70)
-REG32(SCRATCH8, 0x78)
+REG32(SCRATCH0, 0x28)
+REG32(SCRATCH1, 0x30)
+REG32(SCRATCH2, 0x38)
+REG32(SCRATCH3, 0x40)
+REG32(SCRATCH4, 0x48)
+REG32(SCRATCH5, 0x50)
+REG32(SCRATCH6, 0x58)
+REG32(SCRATCH7, 0x60)
 
 /* RLRAM is implemented within MMIO to allow RACL enforcement */
 REG32(RLRAM_START, ROTIF_RLRAM_OFFSET)
@@ -78,7 +76,7 @@ struct RivosRotIFState {
     uint32_t counter[ROTIF_NUM_COUNTERS];
     uint32_t sem[ROTIF_NUM_SEMAPHORES];
     uint8_t  scratch[ROTIF_NUM_SCRATCH * 8];
-    uint8_t  rlram[ROTIF_NUM_RAM_BYTES];
+    uint8_t  rlram[ROTIF_RLRAM_SIZE];
 
     hwaddr cur_addr;
     uint32_t bytes_left;
@@ -123,7 +121,7 @@ static MemTxResult rotif_read(void *opaque,
             value = s->sem[reg - R_SEM0];
         }
         break;
-    case R_SCRATCH0...R_SCRATCH8+1:
+    case R_SCRATCH0...R_SCRATCH7+1:
         offset = addr - A_SCRATCH0;
         if (size == 1) {
             value = s->scratch[offset];
@@ -198,7 +196,7 @@ static MemTxResult rotif_write(void *opaque,
             }
         }
         break;
-    case R_SCRATCH0...R_SCRATCH8+1:
+    case R_SCRATCH0...R_SCRATCH7+1:
         offset = addr - A_SCRATCH0;
         if (size == 1) {
             s->scratch[offset] = val;

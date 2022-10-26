@@ -22,6 +22,12 @@
 #include "hw/registerfields.h"
 #include "hw/sysbus.h"
 #include "sysemu/dma.h"
+#include "hw/pci/pcie_regs.h"
+
+/* this should get into include/standard-headers/linux/pci_regs.h */
+#define PCI_EXT_CAP_ID_DOE      0x2E    /* Data Object Exchange */
+
+#define RIVOS_GENDOEMBOX_VERS   0x02
 
 /*
  * The Rivos Generic DOE Mailbox spec:
@@ -55,8 +61,8 @@ struct RivosDOE {
     AddressSpace *as;
     qemu_irq irq;
 
-    bool client_int;
-    bool async_msg;
+    uint32_t ext_cap;
+    uint32_t cap;
 
     uint32_t ctrl;
     uint32_t status;
@@ -72,23 +78,29 @@ struct RivosDOE {
     uint32_t out_count;
 };
 
-REG32(DOE_CTRL, 0x0)
+REG32(DOE_EXT_CAP, 0x0)
+REG32(DOE_CAP, 0x4)
+    FIELD(DOE_CAP, INT,        0,  1)
+    FIELD(DOE_CAP, INT_MSG,    1, 11)
+    FIELD(DOE_CAP, ATTN,      12,  1)
+    FIELD(DOE_CAP, ASYNC_MSG, 13,  1)
+REG32(DOE_CTRL, 0x8)
     FIELD(DOE_CTRL, ABORT,     0, 1)
     FIELD(DOE_CTRL, INT_EN,    1, 1)
     FIELD(DOE_CTRL, ATTN,      2, 1)
     FIELD(DOE_CTRL, ASYNC_EN,  3, 1)
     FIELD(DOE_CTRL, GO,       31, 1)
-REG32(DOE_STS, 0x4)
+REG32(DOE_STS, 0xc)
     FIELD(DOE_STS, BUSY,       0, 1)
     FIELD(DOE_STS, INT_STS,    1, 1)
     FIELD(DOE_STS, ERROR,      2, 1)
     FIELD(DOE_STS, ASYNC_STS,  3, 1)
     FIELD(DOE_STS, AT_ATTN,    4, 1)
     FIELD(DOE_STS, READY,     31, 1)
-REG32(DOE_WDATA, 0x8)
-REG32(DOE_RDATA, 0xC)
+REG32(DOE_WDATA, 0x10)
+REG32(DOE_RDATA, 0x14)
 
-#define CLIENT_REGS_SIZE    0x10
+#define CLIENT_REGS_SIZE    0x18
 
 REG32(HOST_TRUE_CTRL,     0x00)
     FIELD(TRUE_CTRL, INT_EN,    1, 1)
@@ -251,6 +263,12 @@ static MemTxResult doe_client_read(void *opaque,
     uint32_t value = 0;
 
     switch (addr >> 2) {
+    case R_DOE_EXT_CAP:
+        value = doe->ext_cap;
+        break;
+    case R_DOE_CAP:
+        value = doe->cap;
+        break;
     case R_DOE_CTRL:
         value = doe->ctrl;
         break;
@@ -290,6 +308,9 @@ static MemTxResult doe_client_write(void *opaque,
 
     //printf("DOE client write +%x -> %08x\n", (int)addr, val);
     switch (addr >> 2) {
+    case R_DOE_EXT_CAP:
+    case R_DOE_CAP:
+        break;
     case R_DOE_CTRL:
         if (val & R_DOE_CTRL_ABORT_MASK) {
             doe->in_wrptr = doe->in_base;
@@ -307,12 +328,8 @@ static MemTxResult doe_client_write(void *opaque,
             doe->status |= R_TRUE_STS_BUSY_MASK;
             qemu_irq_raise(doe->irq);
         }
-        if (doe->client_int) {
-            doe->ctrl |= val & R_DOE_CTRL_INT_EN_MASK;
-        }
-        if (doe->async_msg) {
-            doe->ctrl |= val & R_DOE_CTRL_ASYNC_EN_MASK;
-        }
+        doe->ctrl |= val & R_DOE_CTRL_INT_EN_MASK;
+        doe->ctrl |= val & R_DOE_CTRL_ASYNC_EN_MASK;
         break;
     case R_DOE_STS:
         if (val & R_DOE_STS_INT_STS_MASK) {
@@ -386,13 +403,20 @@ void rivos_doe_reset(RivosDOE *doe)
     /* Host firmware is responsible for most state clearing */
 }
 
-RivosDOE *rivos_doe_create(Object *parent, uint32_t options)
+RivosDOE *rivos_doe_create(Object *parent, uint32_t next_cap)
 {
     RivosDOE *doe = g_new0(RivosDOE, 1);
 
-    /* Interrupts are generated directly by the host firmware */
-    doe->client_int = (options & DOE_CLIENT_INTERRUPT) != 0;
-    doe->async_msg = (options & DOE_ASYNC_MESSAGES) != 0;
+    /*
+     * TODO: instances within PCIe config headers may require some
+     * refactoring overall to interface play nice with PCIDevice.
+     */
+    doe->ext_cap = PCI_EXT_CAP(PCI_EXT_CAP_ID_DOE,
+                               RIVOS_GENDOEMBOX_VERS,
+                               next_cap);
+
+    /* All features are always present even if non-functional or unused */
+    doe->cap = R_DOE_CAP_ASYNC_MSG_MASK | R_DOE_CAP_INT_MASK;
 
     memory_region_init_io(&doe->host_mmio, parent, &doe_host_ops,
                           doe, "doe-host", HOST_REGS_SIZE);
