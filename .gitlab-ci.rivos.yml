@@ -75,17 +75,16 @@ update-sdk:
 
 nix-build:
   stage: build
-  image: nixos/nix
+  image: gitlab.ba.rivosinc.com:5050/rv/sw/int/rivos-nix
   variables:
     NIX_CONFIG: |
       experimental-features = nix-command flakes
+      extra-substituters = s3://nix-cache/?endpoint=ps-111.ba.rivosinc.com:9021
+      extra-trusted-public-keys = ps-111.ba.rivosinc.com-1:mo+u7qMQnX3nSJg7pPVXVZvBUUhI44rdxdqmGbIsgeQ=
       max-jobs = 8
       cores = 32
+    INSTALLABLES: '.?submodules=1#qemu'
   script:
-    - nix build '.?submodules=1#qemu' '.?submodules=1#qemu.plugins'
-    - nix-store --export $(nix-store -qR result*) > nix_closure.mnar
-  artifacts:
-    name: nix_closure
-    paths:
-      - nix_closure.mnar
-    expire_in: 12h
+    - nix build --print-build-logs ${INSTALLABLES}
+    - push-rivos-cache ${INSTALLABLES}
+
