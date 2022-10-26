@@ -555,9 +555,9 @@ static void reflect(uint8_t * buffer, size_t size) {
 #define CRC40 4
 #define CRC64 7
 
-uint64_t const Mask[8] = { 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0, 0, 0xFFFFFFFFFFFFFFFF };
-uint64_t const Msbcheck[8] = { 0x80, 0x8000, 0x800000, 0x80000000, 0x8000000000, 0, 0, 0x8000000000000000 };
-uint8_t const Shifter[8] = { 0, 8, 16, 24, 32, 0, 0, 56 };
+uint64_t const Mask[8] = { 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0xFFFFFFFFFFFF, 0xFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF };
+uint64_t const Msbcheck[8] = { 0x80, 0x8000, 0x800000, 0x80000000, 0x8000000000, 0x800000000000, 0x80000000000000, 0x8000000000000000 };
+uint8_t const Shifter[8] = { 0, 8, 16, 24, 32, 40, 48, 56 };
 
 static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Width)
 {
@@ -611,16 +611,17 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     hwaddr src = descriptor->source;
 
     /* extract fields */
-    uint64_t width = FIELD_EX16(crc_ctl, CRC_CTRL, WIDTH) + 1;
+    uint64_t byte_width = (FIELD_EX16(crc_ctl, CRC_CTRL, WIDTH) + 1);
+    uint64_t bit_width = byte_width * 8;
     bool reflect_in = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_IN);
     bool reflect_out = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_OUT);
     uint8_t pad = FIELD_EX16(crc_ctl, CRC_CTRL, PAD_BIT);
     pad = pad ? 0xf : 0x0;
-    polynomial &= ((1 << width) - 1);
-    size_t size = FIELD_EX16(job_control, JOB_CTRL, NUM_BYTES);
-    size_t size_adjusted = (size % width == 0)
+    polynomial &= ((1 << bit_width) - 1);
+    size_t size = FIELD_EX64(job_control, JOB_CTRL, NUM_BYTES);
+    size_t size_adjusted = (size % byte_width == 0)
                             ? size
-                            : (size + (width - (size % width)));
+                            : (size + (byte_width - (size % byte_width)));
 
     /* Pad zeros if needed */
     uint8_t * src_local = malloc(size_adjusted);
@@ -639,10 +640,19 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
 
     uint64_t crc_table[256];
     /* Fill up the CRC table */
-    CreateCRCtable(crc_table, polynomial, width);
-    uint64_t crc =
-        CalculateCRC(src_local, size_adjusted, crc_table, width, init_value, xor_value);
+    CreateCRCtable(crc_table, polynomial, bit_width);
 
+    // printf("Printing CRC table:\n");
+    // for(int i = 0; i < 16; i++) {
+    //     for(int j = 0; j < 16; j++) {
+    //         printf("0x%lx ", crc_table[i * 16 + j]);
+    //     }
+    //     printf("\n");
+    // }
+    // printf("\n");
+
+    uint64_t crc =
+        CalculateCRC(src_local, size_adjusted, crc_table, bit_width, init_value, xor_value);
     /* Reflect output if specified */
     if (reflect_out)
         reflect((uint8_t *)&crc, 8);
