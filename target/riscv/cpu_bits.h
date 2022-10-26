@@ -490,25 +490,25 @@
 /*
  * TEE registers
  */
-#define CSR_MTTP            0xbc7
-#define CSR_MPTEPPN         0xbd2
+#define CSR_MTTP            0x6c1
 
 /*
  * R-code registers
  */
-#define CSR_RSCRATCH        0xbc0
-#define CSR_REPC            0xbc1
-#define CSR_RTRCM           0xbc2
-#define CSR_RTRCS           0xbc3
-#define CSR_RMODE           0xbc4
-#define CSR_RTVEC           0xbc5
-#define CSR_RINTERCEPT      0xbc6
-#define CSR_RCSRINT0        0xbc8
-#define CSR_RCSRINT1        0xbc9
-#define CSR_RCSRINT2        0xbca
-#define CSR_RCSRINT3        0xbcb
-#define CSR_RCODE_IRANGE    0xbcc
-#define CSR_RCODE_DRANGE    0xbcd
+#define CSR_RTVEC           0x800
+#define CSR_RMODE           0x801
+#define CSR_RSCRATCH        0x802
+#define CSR_REPC            0x803
+#define CSR_TRCM            0x804
+#define CSR_TRCS            0x805
+#define CSR_RINTERCEPT      0x806
+#define CSR_RCSRINT0        0x807
+#define CSR_RCSRINT1        0x808
+#define CSR_RCSRINT2        0x809
+#define CSR_RCSRINT3        0x80a
+#define CSR_RCODE_IRANGE    0x80b
+#define CSR_RCODE_DRANGE    0x80c
+#define CSR_MPTEPPN         0x80e
 
 /* mstatus CSR bits */
 #define MSTATUS_UIE         0x00000001

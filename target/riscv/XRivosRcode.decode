@@ -15,26 +15,39 @@
 # You should have received a copy of the GNU General Public License along with
 # this program.  If not, see <http://www.gnu.org/licenses/>.
 
+#
+# The field and argument set definitions here are equivalent to ones from
+# insn32.decode, but those can't be used directly from this file - but Since
+# generated sources from all decode files end up included into translate.c,
+# the argument set names need to be unique.
+#
+
 # Fields
-%rs2  20:5
-%rs1  15:5
-%rd    7:5
+%imm_i    20:s12
+%imm_s    25:s7 7:5
+%rs2      20:5
+%rs1      15:5
+%rd        7:5
+
+# Argument sets:
+&ri    imm rs1 rd
+&rs    imm rs1 rs2
 
 # Formats
-@r       .......   ..... ..... ... ..... ....... %rs2 %rs1 %rd
-@r2      .......   ..... ..... ... ..... ....... %rs1 %rd
+@rl      ............    ..... ... ..... ....... &ri      imm=%imm_i %rs1 %rd
+@rs      .......   ..... ..... ... ..... ....... &rs      imm=%imm_s %rs2 %rs1
 @rinval  ....... ..... .....   ... ..... ....... %rs1
 
 rret        0011000 00010 00000 000 00000 0001011
 rinval_mtt  0001011 00000 ..... 000 00000 0001011 @rinval
-rlb         0110000 00000 ..... 100 ..... 0001011 @r2
-rlbu        0110000 00001 ..... 100 ..... 0001011 @r2
-rlh         0110010 00000 ..... 100 ..... 0001011 @r2
-rlhu        0110010 00001 ..... 100 ..... 0001011 @r2
-rlw         0110100 00000 ..... 100 ..... 0001011 @r2
-rlwu        0110100 00001 ..... 100 ..... 0001011 @r2
-rld         0110110 00000 ..... 100 ..... 0001011 @r2
-rsb         0110001 ..... ..... 100 ..... 0001011 @r
-rsh         0110011 ..... ..... 100 ..... 0001011 @r
-rsw         0110101 ..... ..... 100 ..... 0001011 @r
-rsd         0110111 ..... ..... 100 ..... 0001011 @r
+rlb         ............  ..... 000 ..... 0101011 @rl
+rlbu        ............  ..... 100 ..... 0101011 @rl
+rlh         ............  ..... 001 ..... 0101011 @rl
+rlhu        ............  ..... 101 ..... 0101011 @rl
+rlw         ............  ..... 010 ..... 0101011 @rl
+rlwu        ............  ..... 110 ..... 0101011 @rl
+rld         ............  ..... 011 ..... 0101011 @rl
+rsb         ....... ..... ..... 100 ..... 0001011 @rs
+rsh         ....... ..... ..... 101 ..... 0001011 @rs
+rsw         ....... ..... ..... 110 ..... 0001011 @rs
+rsd         ....... ..... ..... 111 ..... 0001011 @rs

@@ -37,7 +37,7 @@ static bool trans_rret(DisasContext *ctx, arg_rret *a)
 static bool gen_rload_tl(DisasContext *ctx, arg_rlb *a, MemOp memop)
 {
     TCGv dest = dest_gpr(ctx, a->rd);
-    TCGv addr = get_address(ctx, a->rs1, 0);
+    TCGv addr = get_address(ctx, a->rs1, a->imm);
 
     tcg_gen_qemu_ld_tl(dest, addr, MMU_RCODE_IDX, memop);
     gen_set_gpr(ctx, a->rd, dest);
@@ -81,7 +81,7 @@ static bool trans_rlwu(DisasContext *ctx, arg_rlwu *a)
 
 static bool gen_rstore_tl(DisasContext *ctx, arg_rsb *a, MemOp memop)
 {
-    TCGv addr = get_address(ctx, a->rs1, 0);
+    TCGv addr = get_address(ctx, a->rs1, a->imm);
     TCGv data = get_gpr(ctx, a->rs2, EXT_NONE);
 
     tcg_gen_qemu_st_tl(data, addr, MMU_RCODE_IDX, memop);
