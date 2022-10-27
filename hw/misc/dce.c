@@ -638,7 +638,8 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     bool reflect_out = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_OUT);
     uint8_t pad = FIELD_EX16(crc_ctl, CRC_CTRL, PAD_BIT);
     pad = pad ? 0xf : 0x0;
-    polynomial &= ((1 << bit_width) - 1);
+    polynomial = (bit_width == 64) ? ~(0ULL) : ((1ULL << bit_width) - 1);
+
     size_t size = FIELD_EX64(job_control, JOB_CTRL, NUM_BYTES);
     size_t size_adjusted = (size % byte_width == 0)
                             ? size
