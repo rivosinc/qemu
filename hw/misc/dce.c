@@ -558,7 +558,7 @@ static void reflect8(uint8_t * buffer) {
         *buffer = b;
 }
 
-void reflect(uint64_t* Inp, uint8_t Width)
+static void reflect(uint64_t* Inp, uint8_t Width)
 {
     uint64_t tmp = ((uint64_t)Width / 8) - 1;
     uint64_t mask = Msbcheck[tmp];
