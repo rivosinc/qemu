@@ -530,21 +530,6 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
 #endif // CONFIG_DCE_COMPRESSION
 }
 
-static void reflect(uint8_t * buffer, size_t size) {
-    for (int i = 0; i < size; i ++) {
-        uint8_t b = buffer[i];
-        /*
-         * bit 7 is swapped with bit 0
-         * bit 6 is swapped with bit 1
-         * bit 5 is swapped with bit 2
-         * bit 4 is swapped with bit 3
-         */
-        b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
-        b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
-        b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
-    }
-}
-
 /* CRC specific, move to a seperate file ? */
 
 // Mode can be one of followings;
@@ -558,6 +543,42 @@ static void reflect(uint8_t * buffer, size_t size) {
 uint64_t const Mask[8] = { 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0xFFFFFFFFFFFF, 0xFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF };
 uint64_t const Msbcheck[8] = { 0x80, 0x8000, 0x800000, 0x80000000, 0x8000000000, 0x800000000000, 0x80000000000000, 0x8000000000000000 };
 uint8_t const Shifter[8] = { 0, 8, 16, 24, 32, 40, 48, 56 };
+
+static void reflect8(uint8_t * buffer) {
+        /*
+         * bit 7 is swapped with bit 0
+         * bit 6 is swapped with bit 1
+         * bit 5 is swapped with bit 2
+         * bit 4 is swapped with bit 3
+         */
+        uint8_t b = *buffer;
+        b = (b & 0xF0) >> 4 | (b & 0x0F) << 4;
+        b = (b & 0xCC) >> 2 | (b & 0x33) << 2;
+        b = (b & 0xAA) >> 1 | (b & 0x55) << 1;
+        *buffer = b;
+}
+
+void reflect(uint64_t* Inp, uint8_t Width)
+{
+    uint64_t tmp = ((uint64_t)Width / 8) - 1;
+    uint64_t mask = Msbcheck[tmp];
+    tmp = *Inp;
+    *Inp = 0;
+    while (Width--)
+    {
+        if (tmp & 1L)
+            *Inp |= mask;
+        tmp >>= 1;
+        mask >>= 1;
+    }
+    return;
+}
+
+static void reflect_buffer(uint8_t * buffer, size_t size) {
+    for (int i = 0; i < size; i ++) {
+        reflect8(buffer + i);
+    }
+}
 
 static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Width)
 {
@@ -636,16 +657,16 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
 
     /* Reflect input if specified */
     if (reflect_in)
-        reflect(src_local, size);
+        reflect_buffer(src_local, size);
 
     uint64_t crc_table[256];
     /* Fill up the CRC table */
     CreateCRCtable(crc_table, polynomial, bit_width);
 
     // printf("Printing CRC table:\n");
-    // for(int i = 0; i < 16; i++) {
-    //     for(int j = 0; j < 16; j++) {
-    //         printf("0x%lx ", crc_table[i * 16 + j]);
+    // for(int i = 0; i < 32; i++) {
+    //     for(int j = 0; j < 8; j++) {
+    //         printf("0x%lx ", crc_table[i * 8 + j]);
     //     }
     //     printf("\n");
     // }
@@ -653,10 +674,11 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
 
     uint64_t crc =
         CalculateCRC(src_local, size_adjusted, crc_table, bit_width, init_value, xor_value);
-    /* Reflect output if specified */
-    if (reflect_out)
-        reflect((uint8_t *)&crc, 8);
 
+    /* Reflect output if specified */
+    if (reflect_out) {
+        reflect(&crc, bit_width);
+    }
     /* perform the memcpy if using opcode DCE_OPCODE_MEMCPY_CRC_GEN */
     if (descriptor->opcode == DCE_OPCODE_MEMCPY_CRC_GEN) {
         bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
