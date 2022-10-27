@@ -7,6 +7,11 @@
 
   inputs.nixpkgs.url = "nixpkgs/nixos-unstable";
 
+  nixConfig = {
+    extra-substituters = ["https://ps-111.ba.rivosinc.com:9021/nix-cache"];
+    extra-trusted-public-keys = ["ps-111.ba.rivosinc.com-1:mo+u7qMQnX3nSJg7pPVXVZvBUUhI44rdxdqmGbIsgeQ="];
+  };
+
   outputs = {
     self,
     nixpkgs,
