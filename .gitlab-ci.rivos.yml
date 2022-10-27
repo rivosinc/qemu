@@ -77,13 +77,13 @@ nix-build:
   stage: build
   image: gitlab.ba.rivosinc.com:5050/rv/sw/int/rivos-nix
   variables:
+    INSTALLABLES: '.?submodules=1#qemu'
     NIX_CONFIG: |
       experimental-features = nix-command flakes
-      extra-substituters = s3://nix-cache/?endpoint=ps-111.ba.rivosinc.com:9021
+      extra-substituters = https://ps-111.ba.rivosinc.com:9021/nix-cache
       extra-trusted-public-keys = ps-111.ba.rivosinc.com-1:mo+u7qMQnX3nSJg7pPVXVZvBUUhI44rdxdqmGbIsgeQ=
       max-jobs = 8
       cores = 32
-    INSTALLABLES: '.?submodules=1#qemu'
   script:
     - nix build --print-build-logs ${INSTALLABLES}
     - push-rivos-cache ${INSTALLABLES}
