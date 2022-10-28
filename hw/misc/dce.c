@@ -534,11 +534,6 @@ static int dce_compress_decompress(struct DCEDescriptor *descriptor,
 
 // Mode can be one of followings;
 #define CRC8 0
-#define CRC16 1
-#define CRC24 2
-#define CRC32 3
-#define CRC40 4
-#define CRC64 7
 
 uint64_t const Mask[8] = { 0xFF, 0xFFFF, 0xFFFFFF, 0xFFFFFFFF, 0xFFFFFFFFFF, 0xFFFFFFFFFFFF, 0xFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF };
 uint64_t const Msbcheck[8] = { 0x80, 0x8000, 0x800000, 0x80000000, 0x8000000000, 0x800000000000, 0x80000000000000, 0x8000000000000000 };
@@ -655,6 +650,12 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     err |= local_buffer_transfer(state, (uint8_t *)src_local, src,
                         size, src_is_list, TO_LOCAL, attrs);
 
+    /* perform the memcpy if using opcode DCE_OPCODE_MEMCPY_CRC_GEN */
+    if (descriptor->opcode == DCE_OPCODE_MEMCPY_CRC_GEN) {
+        bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
+        err |= local_buffer_transfer(state, src_local, dest,
+                            size, dest_is_list, FROM_LOCAL, attrs);
+    }
 
     /* Reflect input if specified */
     if (reflect_in)
@@ -679,12 +680,6 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     /* Reflect output if specified */
     if (reflect_out) {
         reflect(&crc, bit_width);
-    }
-    /* perform the memcpy if using opcode DCE_OPCODE_MEMCPY_CRC_GEN */
-    if (descriptor->opcode == DCE_OPCODE_MEMCPY_CRC_GEN) {
-        bool dest_is_list = (descriptor->ctrl & DEST_IS_LIST) ? true : false;
-        err |= local_buffer_transfer(state, src_local, dest,
-                            size, dest_is_list, FROM_LOCAL, attrs);
     }
 
     complete_workload(state, descriptor, err, 0, size_adjusted, attrs);
