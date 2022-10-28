@@ -138,7 +138,7 @@ static void complete_workload(DCEState *state, struct DCEDescriptor *descriptor,
     uint64_t completion = 0;
 
     if (err) {
-        printf("ERROR: operation has failed!\n");
+        printf("ERROR: operation has failed, %d!\n", err);
         status = STATUS_FAIL;
     }
     completion = populate_completion(status, spec, data);
@@ -577,6 +577,7 @@ static void reflect_buffer(uint8_t * buffer, size_t size) {
 
 static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Width)
 {
+    printf("Generating CRC table with width %u, Polynomial 0x%lx\n", Width, Polynomial);
     uint64_t index;
     uint64_t value;
     uint8_t cnt;
@@ -593,6 +594,15 @@ static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Widt
         }
         CrcTable[index] = value;
     }
+
+    printf("Printing CRC table:\n");
+    for(int i = 0; i < 32; i++) {
+        for(int j = 0; j < 8; j++) {
+            printf("0x%lx ", CrcTable[i * 8 + j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
 }
 
 static uint64_t CalculateCRC(uint8_t* Buffer, uint64_t Length, uint64_t* CrcTable,
@@ -633,7 +643,8 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     bool reflect_out = FIELD_EX16(crc_ctl, CRC_CTRL, REFLECT_OUT);
     uint8_t pad = FIELD_EX16(crc_ctl, CRC_CTRL, PAD_BIT);
     pad = pad ? 0xf : 0x0;
-    polynomial = (bit_width == 64) ? ~(0ULL) : ((1ULL << bit_width) - 1);
+    polynomial = (bit_width == 64) ? (polynomial & ~(0ULL))
+                                   : (polynomial & ((1ULL << bit_width) - 1));
 
     size_t size = FIELD_EX64(job_control, JOB_CTRL, NUM_BYTES);
     size_t size_adjusted = (size % byte_width == 0)
@@ -664,15 +675,6 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
     uint64_t crc_table[256];
     /* Fill up the CRC table */
     CreateCRCtable(crc_table, polynomial, bit_width);
-
-    // printf("Printing CRC table:\n");
-    // for(int i = 0; i < 32; i++) {
-    //     for(int j = 0; j < 8; j++) {
-    //         printf("0x%lx ", crc_table[i * 8 + j]);
-    //     }
-    //     printf("\n");
-    // }
-    // printf("\n");
 
     uint64_t crc =
         CalculateCRC(src_local, size_adjusted, crc_table, bit_width, init_value, xor_value);
