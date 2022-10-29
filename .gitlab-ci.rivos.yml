@@ -84,7 +84,11 @@ nix-build:
       extra-trusted-public-keys = ps-111.ba.rivosinc.com-1:mo+u7qMQnX3nSJg7pPVXVZvBUUhI44rdxdqmGbIsgeQ=
       max-jobs = 8
       cores = 32
+  before_script:
+    - git config --global url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}".insteadOf "ssh://git@${CI_SERVER_HOST}"
   script:
-    - nix build --print-build-logs ${INSTALLABLES}
+    - nix build --no-update-lock-file --print-build-logs ${INSTALLABLES}
     - push-rivos-cache ${INSTALLABLES}
+  after_script:
+    - git config --global --unset url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}".insteadOf
 

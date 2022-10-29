@@ -5,7 +5,10 @@
 {
   description = "qemu";
 
-  inputs.nixpkgs.url = "nixpkgs/nixos-unstable";
+  inputs = rec {
+    rivos-base.url = "git+ssh://git@gitlab.ba.rivosinc.com/rv/sw/int/rivos-nix.git?dir=base";
+    nixpkgs.follows = "rivos-base/nixpkgs-unstable";
+  };
 
   nixConfig = {
     extra-substituters = ["https://ps-111.ba.rivosinc.com:9021/nix-cache"];
@@ -15,6 +18,7 @@
   outputs = {
     self,
     nixpkgs,
+    ...
   }: let
     # to work with older version of flakes
     lastModifiedDate = self.lastModifiedDate or self.lastModified or "19700101";

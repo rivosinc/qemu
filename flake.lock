@@ -2,22 +2,62 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1653060744,
-        "narHash": "sha256-kfRusllRumpt33J1hPV+CeCCylCXEU7e0gn2/cIM7cY=",
+        "lastModified": 1666867875,
+        "narHash": "sha256-3nD7iQXd/J6KjkT8IjozTuA5p8qjiLKTxvOUmH+AzNM=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "dfd82985c273aac6eced03625f454b334daae2e8",
+        "rev": "c132d0837dfb9035701dcd8fc91786c605c855c3",
         "type": "github"
       },
       "original": {
         "id": "nixpkgs",
-        "ref": "nixos-unstable",
+        "ref": "nixos-22.05",
         "type": "indirect"
+      }
+    },
+    "nixpkgs-unstable": {
+      "locked": {
+        "lastModified": 1666926733,
+        "narHash": "sha256-+gYfOEnQVISPDRNoWm2VJD5OEuTUySt48RchLpvm61o=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f44ba1be526c8da9e79a5759feca2365204003f6",
+        "type": "github"
+      },
+      "original": {
+        "id": "nixpkgs",
+        "ref": "nixpkgs-unstable",
+        "type": "indirect"
+      }
+    },
+    "rivos-base": {
+      "inputs": {
+        "nixpkgs": "nixpkgs",
+        "nixpkgs-unstable": "nixpkgs-unstable"
+      },
+      "locked": {
+        "dir": "base",
+        "lastModified": 1667005202,
+        "narHash": "sha256-ghiLx8Sk8DF2SFj45r7cA5KcLBBGSeeAid/b9GRVbLU=",
+        "ref": "refs/heads/rivos/main",
+        "rev": "659d038c6d24f0b44db6c23bf775a6c560dbfde3",
+        "revCount": 57,
+        "type": "git",
+        "url": "ssh://git@gitlab.ba.rivosinc.com/rv/sw/int/rivos-nix.git?dir=base"
+      },
+      "original": {
+        "dir": "base",
+        "type": "git",
+        "url": "ssh://git@gitlab.ba.rivosinc.com/rv/sw/int/rivos-nix.git?dir=base"
       }
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": [
+          "rivos-base",
+          "nixpkgs-unstable"
+        ],
+        "rivos-base": "rivos-base"
       }
     }
   },
