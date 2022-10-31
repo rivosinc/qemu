@@ -1000,7 +1000,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
             opcode == DCE_OPCODE_DIF_STRP) {
             pci_dma_rw(&state->dev, bfr2, data, block_size,
                 DMA_DIRECTION_FROM_DEVICE, *attrs);
-            bfr2 += pi_size;
+            bfr2 += block_size;
         }
         // h. If opcode == dif_upd || opcode == dif_gen || opcode == dix_gen
         if (opcode == DCE_OPCODE_DIF_GEN ||
