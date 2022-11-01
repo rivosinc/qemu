@@ -54,6 +54,44 @@ docker-build:
   rules:
     - if: $CI_COMMIT_BRANCH
 
+centos7-build:
+  image: centos:centos7
+  tags: ['docker-cpu-xl']
+  stage: build
+  script:
+    - yum -y update
+    - |
+      yum -y install git glib2-devel libfdt-devel make pixman-devel \
+                     bzip2 lzo-devel zlib-devel \
+                     libaio-devel libcap-ng-devel \
+                     curl-devel libssh-devel4 \
+                     python3 python3-pip
+    - pip3 install ninja meson
+    # Add GCC 9 in order to get a decent compiler for the build
+    - yum -y install centos-release-scl
+    - yum clean all
+    - yum -y install devtoolset-9-binutils devtoolset-9-gcc devtoolset-9-gcc-c++
+    # lua 5.3
+    - yum install -y epel-release https://repo.ius.io/ius-release-el7.rpm
+    - yum install -y lua53u-devel
+    - mkdir -p build
+    - cd build
+    - |
+      source /opt/rh/devtoolset-9/enable && \
+      ../configure --prefix="${CENTOS7_INSTALL_PATH}" \
+                   --target-list=riscv32-softmmu,riscv64-softmmu,aarch64-softmmu,riscv32-linux-user,riscv64-linux-user,x86_64-linux-user,aarch64-linux-user \
+                   --enable-plugins && \
+      make -j$(nproc) && \
+      make plugins && \
+      make install
+    - tar -C "${CENTOS7_INSTALL_PATH}" -czf qemu-centos7.tar.gz .
+  artifacts:
+    paths:
+      - build/qemu-centos7.tar.gz
+    expire_in: 3h
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
 package-deb:
   extends: .deploy-deb
   dependencies:
@@ -68,6 +106,16 @@ package-deb:
   before_script:
     - rm -rf "${INSTALL_DIR}"
     - tar -C/ -xzf build/qemu-install.tar.gz
+
+deploy-centos-module:
+  extends: .deploy-module
+  needs: ['prepare-version', 'centos7-build']
+  variables:
+    DISTRO: "centos.7"
+    CONTENT_PATH: "module-install"
+  before_script:
+    - mkdir -p module-install
+    - tar -Cmodule-install -xzf build/qemu-centos7.tar.gz
 
 # Rebuild the rivos-sdk where we are exporting the artifacts built here.
 update-sdk:
