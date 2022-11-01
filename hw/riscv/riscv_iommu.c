@@ -16,6 +16,7 @@
  * with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "cpu_bits.h"
 #include "qemu/osdep.h"
 #include "qom/object.h"
 #include "hw/pci/pci_bus.h"
@@ -27,6 +28,8 @@
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "qemu/host-utils.h"
+#include "qemu/timer.h"
 
 #include "trace.h"
 
@@ -83,6 +86,17 @@ struct RISCVIOMMUState {
 
     GHashTable *ctx_cache;          /* Device translation Context Cache */
     GHashTable *iot_cache;          /* IO Translated Address Cache */
+
+    /* HPM cycle counter */
+    QEMUTimer *hpm_timer;
+    uint64_t hpmcycle_val;      /* Current value of cycle register */
+    uint64_t hpmcycle_prev;     /* Saved value of QEMU_CLOCK_VIRTUAL clock */
+    uint64_t irq_overflow_left; /* Value beyond INT64_MAX after overflow */
+
+    /* HPM event counters */
+    uint8_t hpm_cntrs;
+    GHashTable *hpm_event_ctr_map; /* Mapping of events to counters */
+    pthread_rwlock_t ht_lock;      /* Lock used for hpm_event_ctr_map updates */
 
     AddressSpace trap_as;           /* MRIF/MSI access trap address space */
     MemoryRegion trap_mr;           /* MRIF/MSI access trap memory region */
@@ -226,6 +240,124 @@ static void riscv_iommu_fault(RISCVIOMMUState *s, RISCVIOMMUEvent *ev)
     }
 }
 
+static void __hpm_incr_ctr(RISCVIOMMUState *s, uint32_t ctr_idx)
+{
+    const uint32_t off = ctr_idx << 3;
+    uint64_t cntr_val;
+
+    qemu_spin_lock(&s->regs_lock);
+    cntr_val = ldq_le_p(&s->regs_rw[RIO_REG_IOHPMCTR_BASE + off]);
+    stq_le_p(&s->regs_rw[RIO_REG_IOHPMCTR_BASE + off], cntr_val + 1);
+    qemu_spin_unlock(&s->regs_lock);
+
+    /* Handle the overflow scenario. */
+    if (cntr_val == UINT64_MAX) {
+        /*
+         * Generate interrupt only if OF bit is clear. +1 to offset the cycle
+         * register OF bit.
+         */
+        const uint32_t ovf =
+            riscv_iommu_reg_mod32(s, RIO_REG_IOCNTOVF, BIT(ctr_idx + 1), 0);
+        if (!get_field(ovf, BIT(ctr_idx + 1))) {
+            riscv_iommu_reg_mod64(s,
+                                  RIO_REG_IOHPMEVT_BASE + off,
+                                  RIO_IOHPMEVT_OF,
+                                  0);
+            riscv_iommu_irq_assert(s, RIO_INT_PM);
+        }
+    }
+}
+
+static void riscv_iommu_hpm_incr_ctr(RISCVIOMMUState *s,
+                                     RISCVIOMMUContext *ctx,
+                                     enum RISCVIOMMUEventID event_id)
+{
+    const uint32_t inhibit = riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH);
+    uint32_t did_gscid;
+    uint32_t pid_pscid;
+    uint32_t ctr_idx;
+    gpointer value;
+    uint32_t ctrs;
+    uint64_t evt;
+
+    if (!(s->cap & RIO_CAP_HPM)) {
+        return;
+    }
+
+    pthread_rwlock_rdlock(&s->ht_lock);
+    value =
+        g_hash_table_lookup(s->hpm_event_ctr_map, GUINT_TO_POINTER(event_id));
+    if (value == NULL) {
+        pthread_rwlock_unlock(&s->ht_lock);
+        return;
+    }
+
+    for (ctrs = GPOINTER_TO_UINT(value); ctrs != 0; ctrs &= ctrs - 1) {
+        ctr_idx = ctz32(ctrs);
+        if (get_field(inhibit, BIT(ctr_idx + 1))) {
+            continue;
+        }
+
+        evt = riscv_iommu_reg_get64(s, RIO_REG_IOHPMEVT_BASE + (ctr_idx << 3));
+
+        /*
+         * It's quite possible that event ID has been changed in counter
+         * but hashtable hasn't been updated yet. We don't want to increment
+         * counter for the old event ID.
+         */
+        if (event_id != get_field(evt, RIO_IOHPMEVT_MASK_EID)) {
+            continue;
+        }
+
+        if (get_field(evt, RIO_IOHPMEVT_IDT)) {
+            did_gscid = get_field(ctx->gatp, RIO_ATP_MASK_GSCID);
+            pid_pscid = get_field(ctx->ta, RIO_PCTA_MASK_PSCID);
+        } else {
+            did_gscid = ctx->devid;
+            pid_pscid = ctx->pasid;
+        }
+
+        if (get_field(evt, RIO_IOHPMEVT_PV_PSCV)) {
+            /*
+             * If the transaction does not have a valid process_id, counter
+             * increments if device_id matches DID_GSCID. If the transaction has
+             * a valid process_id, counter increments if device_id matches
+             * DID_GSCID and process_id matches PID_PSCID. See IOMMU
+             * Specification, Chapter 5.23. Performance-monitoring event
+             * selector.
+             */
+            if (ctx->pasid &&
+                get_field(evt, RIO_IOHPMEVT_MASK_PID_PSCID) != pid_pscid) {
+                continue;
+            }
+        }
+
+        if (get_field(evt, RIO_IOHPMEVT_DV_GSCV)) {
+            uint32_t mask = ~0;
+
+            if (get_field(evt, RIO_IOHPMEVT_DMASK)) {
+                /*
+                 * 1001 1011   mask = GSCID
+                 * 0000 0111   mask = mask ^ (mask + 1)
+                 * 1111 1000   mask = ~mask;
+                 */
+                mask = get_field(evt, RIO_IOHPMEVT_MASK_DID_GSCID);
+                mask = mask ^ (mask + 1);
+                mask = ~mask;
+            }
+
+            if ((get_field(evt, RIO_IOHPMEVT_MASK_DID_GSCID) & mask) !=
+                (did_gscid & mask)) {
+                continue;
+            }
+        }
+
+        __hpm_incr_ctr(s, ctr_idx);
+    }
+
+    pthread_rwlock_unlock(&s->ht_lock);
+}
+
 /*
  * RISCV IOMMU Address Translation Lookup - Page Table Walk
  *
@@ -347,6 +479,12 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
                 sc[pass].ptesize, MEMTXATTRS_UNSPECIFIED) != MEMTX_OK) {
             return (iotlb->perm & IOMMU_WO) ? RIO_CAUSE_WR_FAULT
                                             : RIO_CAUSE_RD_FAULT;
+        }
+
+        if (pass == S_STAGE) {
+            riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_S_VS_WALKS);
+        } else {
+            riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_G_WALKS);
         }
 
         if (sc[pass].ptesize == 4) {
@@ -610,6 +748,8 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
 
     /* Device directory tree walk */
     for (; depth-- > 0; ) {
+        riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_DD_WALK);
+
         /*
          * Select device id index bits based on device directory tree level
          * and device context format.
@@ -634,6 +774,8 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
         }
         addr = PPN_PHYS(get_field(de, RIO_DDTE_MASK_PPN));
     }
+
+    riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_DD_WALK);
 
     /* index into device context entry page */
     addr |= (ctx->devid * dc_len) & ~TARGET_PAGE_MASK;
@@ -681,6 +823,8 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
     }
 
     for (depth = RIO_PDTP_MODE_PD8 - mode; depth-- > 0; ) {
+        riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_PD_WALK);
+
         /*
          * Select process id index bits based on process directory tree
          * level. See IOMMU Specification, 2.2. Process-Directory-Table.
@@ -697,6 +841,8 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
         }
         addr = PPN_PHYS(get_field(de, RIO_PDTE_MASK_PPN));
     }
+
+    riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_PD_WALK);
 
     /* Leaf entry in PDT */
     addr |= (ctx->pasid << 4) & ~TARGET_PAGE_MASK;
@@ -994,15 +1140,21 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         return 0;
     }
 
+    riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_URQ);
+
     iot_cache = g_hash_table_ref(s->iot_cache);
 
     enable_faults = !(ctx->tc & RIO_DCTC_DTF);
     enable_pasid = (ctx->tc & RIO_DCTC_PDTV) && (ctx->ta & RIO_PCTA_V);
 
-    /* Check for ATS request while ATS is disabled */
-    if ((iotlb->perm == IOMMU_NONE) && !(ctx->tc & RIO_DCTC_EN_ATS)) {
-        fault = RIO_CAUSE_REQ_INVALID;
-        goto done;
+    /* Check for ATS request. */
+    if (iotlb->perm == IOMMU_NONE) {
+        riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_ATS_RQ);
+        /* Check if ATS is disabled. */
+        if (!(ctx->tc & RIO_DCTC_EN_ATS)) {
+            fault = RIO_CAUSE_REQ_INVALID;
+            goto done;
+        }
     }
 
     iot = riscv_iommu_iot_lookup(ctx, iot_cache, iotlb->iova);
@@ -1014,6 +1166,8 @@ static int riscv_iommu_translate(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
         fault = 0;
         goto done;
     }
+
+    riscv_iommu_hpm_incr_ctr(s, ctx, RIO_HPMEVENT_TLB_MISS);
 
     /* Translate using device directory / page table information. */
     fault = riscv_iommu_spa_fetch(s, ctx, iotlb, false);
@@ -1385,12 +1539,202 @@ static void *riscv_iommu_core_proc(void* arg)
     return NULL;
 }
 
+/* For now we assume IOMMU HPM frequency to be 1GHz so 1-cycle is of 1-ns. */
+static inline uint64_t __get_cycles(void)
+{
+    return qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void __hpm_setup_timer(RISCVIOMMUState *s, uint64_t value)
+{
+    const uint32_t inhibit = riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH);
+    uint64_t overflow_at, overflow_ns;
+
+    if (get_field(inhibit, RIO_IOCNTINH_CY)) {
+        return;
+    }
+
+    /*
+     * We are using INT64_MAX here instead to UINT64_MAX because cycle counter
+     * has 63-bit precision and INT64_MAX is the maximum it can store.
+     */
+    if (value) {
+        overflow_ns = INT64_MAX - value + 1;
+    } else {
+        overflow_ns = INT64_MAX;
+    }
+
+    overflow_at = (uint64_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + overflow_ns;
+
+    if (overflow_at > INT64_MAX) {
+        s->irq_overflow_left = overflow_at - INT64_MAX;
+        overflow_at = INT64_MAX;
+    }
+
+    timer_mod_anticipate_ns(s->hpm_timer, overflow_at);
+}
+
+/* Updates the internal cycle counter state when iocntinh:CY is changed. */
+static void riscv_iommu_process_iocntinh_cy(RISCVIOMMUState *s,
+                                            bool prev_cy_inh)
+{
+    const uint32_t inhibit = riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH);
+
+    /* We only need to process CY bit toggle. */
+    if (!(inhibit ^ prev_cy_inh)) {
+        return;
+    }
+
+    if (!(inhibit & RIO_IOCNTINH_CY)) {
+        /*
+         * Cycle counter is enabled. Just start the timer again and update the
+         * clock snapshot value to point to the current time to make sure
+         * iohpmcycles read is correct.
+         */
+        s->hpmcycle_prev = __get_cycles();
+        __hpm_setup_timer(s, s->hpmcycle_val);
+    } else {
+        /*
+         * Cycle counter is disabled. Stop the timer and update the cycle
+         * counter to record the current value which is last programmed
+         * value + the cycles passed so far.
+         */
+        s->hpmcycle_val = s->hpmcycle_val + (__get_cycles() - s->hpmcycle_prev);
+        timer_del(s->hpm_timer);
+    }
+}
+
+static void riscv_iommu_process_hpmcycle_write(RISCVIOMMUState *s)
+{
+    const uint64_t val = riscv_iommu_reg_get64(s, RIO_REG_IOHPMCYCLES);
+    const uint32_t ovf = riscv_iommu_reg_get32(s, RIO_REG_IOCNTOVF);
+
+    /*
+     * Clear OF bit in IOCNTOVF if it's being cleared in IOHPMCYCLES register.
+     */
+    if (get_field(ovf, RIO_IOCNTOVF_CY) &&
+        !get_field(val, RIO_IOHPMCYCLES_OF)) {
+        riscv_iommu_reg_mod32(s, RIO_REG_IOCNTOVF, 0, RIO_IOCNTOVF_CY);
+    }
+
+    s->hpmcycle_val = val & ~RIO_IOHPMCYCLES_OF;
+    s->hpmcycle_prev = __get_cycles();
+    __hpm_setup_timer(s, s->hpmcycle_val);
+}
+
+static inline bool __check_valid_event_id(enum RISCVIOMMUEventID event_id)
+{
+    return event_id > RIO_HPMEVENT_INVALID && event_id < RIO_HPMEVENT_MAX;
+}
+
+static gboolean __hpm_event_equal(gpointer key, gpointer value, gpointer udata)
+{
+    uint32_t *pair = udata;
+
+    if (GPOINTER_TO_UINT(value) & (1 << pair[0])) {
+        pair[1] = GPOINTER_TO_UINT(key);
+        return true;
+    }
+
+    return false;
+}
+
+/* Caller must check ctr_idx against hpm_ctrs to see if its supported or not. */
+static void
+__update_event_map(RISCVIOMMUState *s, uint64_t value, uint32_t ctr_idx)
+{
+    enum RISCVIOMMUEventID event_id = get_field(value, RIO_IOHPMEVT_MASK_EID);
+    uint32_t pair[2] = { ctr_idx, RIO_HPMEVENT_INVALID };
+    uint32_t new_value = 1 << ctr_idx;
+    gpointer data;
+
+    /* If EventID field is RIO_HPMEVENT_INVALID remove the current mapping. */
+    if (event_id == RIO_HPMEVENT_INVALID) {
+        data = g_hash_table_find(s->hpm_event_ctr_map, __hpm_event_equal, pair);
+
+        new_value = GPOINTER_TO_UINT(data) & ~(new_value);
+        pthread_rwlock_wrlock(&s->ht_lock);
+        if (new_value != 0) {
+            g_hash_table_replace(s->hpm_event_ctr_map,
+                                 GUINT_TO_POINTER(pair[1]),
+                                 GUINT_TO_POINTER(new_value));
+        } else {
+            g_hash_table_remove(s->hpm_event_ctr_map,
+                                GUINT_TO_POINTER(pair[1]));
+        }
+        pthread_rwlock_unlock(&s->ht_lock);
+
+        return;
+    }
+
+    /* Update the counter mask if the event is already enabled. */
+    if (g_hash_table_lookup_extended(s->hpm_event_ctr_map,
+                                     GUINT_TO_POINTER(event_id),
+                                     NULL,
+                                     &data)) {
+        new_value |= GPOINTER_TO_UINT(data);
+    }
+
+    pthread_rwlock_wrlock(&s->ht_lock);
+    g_hash_table_insert(s->hpm_event_ctr_map,
+                        GUINT_TO_POINTER(event_id),
+                        GUINT_TO_POINTER(new_value));
+    pthread_rwlock_unlock(&s->ht_lock);
+}
+
+static void riscv_iommu_process_hpmevt_write(RISCVIOMMUState *s,
+                                             uint32_t evt_reg)
+{
+    const uint32_t ctr_idx = (evt_reg - RIO_REG_IOHPMEVT_BASE) >> 3;
+    const uint32_t ovf = riscv_iommu_reg_get32(s, RIO_REG_IOCNTOVF);
+    uint64_t val = riscv_iommu_reg_get64(s, evt_reg);
+
+    if (ctr_idx >= s->hpm_cntrs) {
+        return;
+    }
+
+    /* Clear OF bit in IOCNTOVF if it's being cleared in IOHPMEVT register. */
+    if (get_field(ovf, BIT(ctr_idx + 1)) && !get_field(val, RIO_IOHPMEVT_OF)) {
+        /* +1 to offset CYCLE register OF bit. */
+        riscv_iommu_reg_mod32(s, RIO_REG_IOCNTOVF, 0, BIT(ctr_idx + 1));
+    }
+
+    if (!__check_valid_event_id(get_field(val, RIO_IOHPMEVT_MASK_EID))) {
+        /* Reset EventID (WARL) field to invalid. */
+        val = set_field(val, RIO_IOHPMEVT_MASK_EID, RIO_HPMEVENT_INVALID);
+        riscv_iommu_reg_set64(s, evt_reg, val);
+    }
+
+    __update_event_map(s, val, ctr_idx);
+}
+
+static void riscv_iommu_process_hpm_writes(RISCVIOMMUState *s,
+                                           uint32_t regb,
+                                           bool prev_cy_inh)
+{
+    switch (regb) {
+    case RIO_REG_IOCNTINH:
+        riscv_iommu_process_iocntinh_cy(s, prev_cy_inh);
+        break;
+
+    case RIO_REG_IOHPMCYCLES:
+    case RIO_REG_IOHPMCYCLES + 4:
+        riscv_iommu_process_hpmcycle_write(s);
+        break;
+
+    case RIO_REG_IOHPMEVT_BASE ... RIO_REG_IOHPMEVT_END + 4:
+        riscv_iommu_process_hpmevt_write(s, regb & ~7);
+        break;
+    }
+}
+
 static MemTxResult riscv_iommu_mmio_write(void *opaque, hwaddr addr,
         uint64_t data, unsigned size, MemTxAttrs attrs)
 {
     RISCVIOMMUState *s = opaque;
-    uint32_t busy = 0;
     uint32_t regb = addr & ~3;
+    bool cy_inh = false;
+    uint32_t busy = 0;
     uint32_t exec = 0;
 
     if (size == 0 || size > 8 || (addr & (size - 1)) != 0) {
@@ -1439,6 +1783,16 @@ static MemTxResult riscv_iommu_mmio_write(void *opaque, hwaddr addr,
         busy = RIO_PQ_BUSY;
         break;
 
+    case RIO_REG_IOCNTINH:
+        if (addr != RIO_REG_IOCNTINH) {
+            break;
+        }
+
+        /* Store previous value of CY bit. */
+        cy_inh =
+            !!(riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH) & RIO_IOCNTINH_CY);
+        break;
+
     case RIO_REG_TR_REQ_CTRL:
     case RIO_REG_TR_REQ_CTRL + 4:
         exec = BIT(RIO_EXEC_TR_REQUEST);
@@ -1483,6 +1837,11 @@ static MemTxResult riscv_iommu_mmio_write(void *opaque, hwaddr addr,
     }
     qemu_spin_unlock(&s->regs_lock);
 
+    /* Process HPM writes and update any internal state if needed. */
+    if (regb >= RIO_REG_IOCNTOVF && regb <= (RIO_REG_IOHPMEVT_END + 4)) {
+        riscv_iommu_process_hpm_writes(s, regb, cy_inh);
+    }
+
     /* Wakeup core processing thread. */
     if (exec) {
         qemu_mutex_lock(&s->core_lock);
@@ -1494,24 +1853,58 @@ static MemTxResult riscv_iommu_mmio_write(void *opaque, hwaddr addr,
     return MEMTX_OK;
 }
 
+static uint64_t riscv_iommu_hpmcycle_read(RISCVIOMMUState *s)
+{
+    const uint64_t cycle = riscv_iommu_reg_get64(s, RIO_REG_IOHPMCYCLES);
+    const uint32_t inhibit = riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH);
+    const uint64_t ctr_prev = s->hpmcycle_prev;
+    const uint64_t ctr_val = s->hpmcycle_val;
+
+    if (get_field(inhibit, RIO_IOCNTINH_CY)) {
+        /*
+         * Counter should not increment if inhibit bit is set. We can't really
+         * stop the QEMU_CLOCK_VIRTUAL, so we just return the last updated
+         * counter value to indicate that counter was not incremented.
+         */
+        return (ctr_val & RIO_IOHPMCYCLES_MASK_CNTR) |
+               (cycle & RIO_IOHPMCYCLES_OF);
+    }
+
+    return (ctr_val + __get_cycles() - ctr_prev) | (cycle & RIO_IOHPMCYCLES_OF);
+}
+
 static MemTxResult riscv_iommu_mmio_read(void *opaque, hwaddr addr,
         uint64_t *data, unsigned size, MemTxAttrs attrs)
 {
     RISCVIOMMUState *s = opaque;
     uint64_t val = -1;
+    uint8_t *ptr;
+
+    if ((addr & (size - 1)) != 0) {
+        /* Unsupported MMIO alignment. */
+        return MEMTX_ERROR;
+    }
 
     if (addr + size > sizeof(s->regs_rw)) {
         return MEMTX_ACCESS_ERROR;
     }
 
+    /* Compute cycle register value. */
+    if ((addr & ~7) == RIO_REG_IOHPMCYCLES) {
+        val = riscv_iommu_hpmcycle_read(s);
+        ptr = (uint8_t *)&val + (addr & 7);
+    } else {
+        ptr = &s->regs_rw[addr];
+    }
+
     if (size == 1) {
-        val = (uint64_t) s->regs_rw[addr];
+        val = (uint64_t)*ptr;
     } else if (size == 2) {
-        val = lduw_le_p(&s->regs_rw[addr]);
+        val = lduw_le_p(ptr);
     } else if (size == 4) {
-        val = ldl_le_p(&s->regs_rw[addr]);
+        val = ldl_le_p(ptr);
     } else if (size == 8) {
-        val = ldq_le_p(&s->regs_rw[addr]);
+        val = ldq_le_p(ptr);
     } else {
         return MEMTX_ERROR;
     }
@@ -1587,6 +1980,39 @@ static const MemoryRegionOps riscv_iommu_trap_ops = {
     }
 };
 
+/* Timer callback for cycle counter overflow. */
+static void riscv_iommu_hpm_timer_cb(void *priv)
+{
+    RISCVIOMMUState *s = priv;
+    const uint32_t inhibit = riscv_iommu_reg_get32(s, RIO_REG_IOCNTINH);
+    uint32_t ovf;
+
+    if (get_field(inhibit, RIO_IOCNTINH_CY)) {
+        return;
+    }
+
+    if (s->irq_overflow_left > 0) {
+        uint64_t irq_trigger_at =
+            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->irq_overflow_left;
+        timer_mod_anticipate_ns(s->hpm_timer, irq_trigger_at);
+        s->irq_overflow_left = 0;
+        return;
+    }
+
+    ovf = riscv_iommu_reg_get32(s, RIO_REG_IOCNTOVF);
+    if (!get_field(ovf, RIO_IOCNTOVF_CY)) {
+        /*
+         * We don't need to set hpmcycle_val to zero and update hpmcycle_prev to
+         * current clock value. The way we calculate iohpmcycs will overflow
+         * and return the correct value. This avoids the need to synchronize
+         * timer callback and write callback.
+         */
+        riscv_iommu_reg_mod32(s, RIO_REG_IOCNTOVF, RIO_IOCNTOVF_CY, 0);
+        riscv_iommu_reg_mod64(s, RIO_REG_IOHPMCYCLES, RIO_IOHPMCYCLES_OF, 0);
+        riscv_iommu_irq_assert(s, RIO_INT_PM);
+    }
+}
+
 static void riscv_iommu_init(RISCVIOMMUState *s)
 {
     s->cap = s->version & RIO_CAP_REV_MASK;
@@ -1603,6 +2029,14 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
     if (s->enable_g_stage) {
         s->cap |= RIO_CAP_G_SV32 | RIO_CAP_G_SV39 |
                   RIO_CAP_G_SV48 | RIO_CAP_G_SV57;
+    }
+    if (s->hpm_cntrs > 0) {
+        /* Clip number of HPM counters to maximum supported (31). */
+        if (s->hpm_cntrs > RIO_IOHPMCTR_NUM_REGS) {
+            s->hpm_cntrs = RIO_IOHPMCTR_NUM_REGS;
+        }
+        /* Enable hardware performance monitor interface */
+        s->cap |= RIO_CAP_HPM;
     }
     /* Enable translation debug interface */
     s->cap |= RIO_CAP_DBG;
@@ -1640,6 +2074,15 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
     stl_le_p(&s->regs_wc[RIO_REG_PQCSR], RIO_PQ_FAULT | RIO_PQ_FULL);
     stl_le_p(&s->regs_ro[RIO_REG_PQCSR], RIO_PQ_ACTIVE | RIO_PQ_BUSY);
     stl_le_p(&s->regs_wc[RIO_REG_IPSR], ~0);
+    /* If HPM registers are enabled. */
+    if (s->cap & RIO_CAP_HPM) {
+        /* +1 for cycle counter bit. */
+        stl_le_p(&s->regs_ro[RIO_REG_IOCNTINH],
+                 ~MAKE_32BIT_MASK(0, s->hpm_cntrs + 1));
+        stq_le_p(&s->regs_ro[RIO_REG_IOHPMCYCLES], 0);
+        memset(&s->regs_ro[RIO_REG_IOHPMCTR_BASE], 0x00, s->hpm_cntrs * 8);
+        memset(&s->regs_ro[RIO_REG_IOHPMEVT_BASE], 0x00, s->hpm_cntrs * 8);
+    }
     stl_le_p(&s->regs_ro[RIO_REG_IVEC], 0);
     stq_le_p(&s->regs_rw[RIO_REG_DDTP], s->ddtp);
     /* If debug registers enabled. */
@@ -1658,6 +2101,13 @@ static void riscv_iommu_init(RISCVIOMMUState *s)
                                          g_free, NULL);
     s->iot_cache = g_hash_table_new_full(__iot_hash, __iot_equal,
                                          g_free, NULL);
+
+    if (s->cap & RIO_CAP_HPM) {
+        s->hpm_event_ctr_map = g_hash_table_new(g_direct_hash, g_direct_equal);
+        pthread_rwlock_init(&s->ht_lock, NULL);
+        s->hpm_timer =
+            timer_new_ns(QEMU_CLOCK_VIRTUAL, riscv_iommu_hpm_timer_cb, s);
+    }
 
     s->iommus.le_next = NULL;
     s->iommus.le_prev = NULL;
@@ -1678,6 +2128,11 @@ static void riscv_iommu_exit(RISCVIOMMUState *s)
     qemu_thread_join(&s->core_proc);
     qemu_cond_destroy(&s->core_cond);
     qemu_mutex_destroy(&s->core_lock);
+    if (s->cap & RIO_CAP_HPM) {
+        timer_free(s->hpm_timer);
+        pthread_rwlock_destroy(&s->ht_lock);
+        g_hash_table_unref(s->hpm_event_ctr_map);
+    }
     g_hash_table_unref(s->iot_cache);
     g_hash_table_unref(s->ctx_cache);
 }
@@ -1833,6 +2288,8 @@ static Property riscv_iommu_properties[] = {
     DEFINE_PROP_BOOL("g-stage", RISCVIOMMUStatePci, iommu.enable_g_stage, TRUE),
     DEFINE_PROP_LINK("downstream-mr", RISCVIOMMUStatePci, iommu.down_mr,
             TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_UINT8("hpm-counters", RISCVIOMMUStatePci, iommu.hpm_cntrs,
+            RIO_IOHPMCTR_NUM_REGS),
     DEFINE_PROP_END_OF_LIST(),
 };
 

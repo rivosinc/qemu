@@ -48,7 +48,9 @@
 #define RIO_REG_IOCNTINH        0x005C
 #define RIO_REG_IOHPMCYCLES     0x0060
 #define RIO_REG_IOHPMCTR_BASE   0x0068
+#define RIO_REG_IOHPMCTR_END    0x0158
 #define RIO_REG_IOHPMEVT_BASE   0x0160
+#define RIO_REG_IOHPMEVT_END    0x0250
 #define RIO_REG_TR_REQ_IOVA     0x0258
 #define RIO_REG_TR_REQ_CTRL     0x0260
 #define RIO_REG_TR_RESPONSE     0x0268
@@ -151,6 +153,27 @@
 #define RIO_IPSR_FQIP          (1 << RIO_INT_FQ)
 #define RIO_IPSR_PMIP          (1 << RIO_INT_PM)
 #define RIO_IPSR_PQIP          (1 << RIO_INT_PQ)
+
+/* HPM event counter register. */
+#define RIO_IOHPMCTR_NUM_REGS        31
+#define RIO_IOHPMEVT_NUM_REGS        31
+
+#define RIO_IOCNTOVF_CY             (1ULL << 0)
+
+#define RIO_IOCNTINH_CY             (1ULL << 0)
+
+#define RIO_IOHPMCYCLES_MASK_CNTR    0x7FFFFFFFFFFFFFFFULL
+#define RIO_IOHPMCYCLES_OF          (1ULL << 63)
+
+#define RIO_IOHPMEVT_MASK_EID        0x0000000000007FFFULL
+#define RIO_IOHPMEVT_MASK_PID_PSCID  0x0000000FFFFF0000ULL
+#define RIO_IOHPMEVT_MASK_DID_GSCID  0x0FFFFFF000000000ULL
+
+#define RIO_IOHPMEVT_DMASK          (1ULL << 15)
+#define RIO_IOHPMEVT_PV_PSCV        (1ULL << 60)
+#define RIO_IOHPMEVT_DV_GSCV        (1ULL << 61)
+#define RIO_IOHPMEVT_IDT            (1ULL << 62)
+#define RIO_IOHPMEVT_OF             (1ULL << 63)
 
 /* Interrupt vector mapping */
 #define RIO_IVEC_CQIV          (0x0F << 0)
@@ -351,6 +374,23 @@ typedef struct RISCVIOMMUEvent {
 #define RIO_CAUSE_MRIF_CORRUPTED  271 /* DDT entry corrupted */
 #define RIO_CAUSE_ERROR           272 /* Internal data error */
 #define RIO_CAUSE_MSI_FAULT       273 /* MSI write access fault */
+
+/*
+ * HPM Event IDs. See IOMMU Specification, Chapter 5.23.
+ * Performance-monitoring event selector.
+ */
+enum RISCVIOMMUEventID {
+    RIO_HPMEVENT_INVALID,    /* Invalid event, do not count */
+    RIO_HPMEVENT_URQ,        /* Untranslated requests */
+    RIO_HPMEVENT_TRQ,        /* Translated requests */
+    RIO_HPMEVENT_ATS_RQ,     /* ATS translation requests */
+    RIO_HPMEVENT_TLB_MISS,   /* TLB misses */
+    RIO_HPMEVENT_DD_WALK,    /* Device directory walks */
+    RIO_HPMEVENT_PD_WALK,    /* Process directory walks */
+    RIO_HPMEVENT_S_VS_WALKS, /* S/VS-Stage page table walks */
+    RIO_HPMEVENT_G_WALKS,    /* G-Stage page table walks */
+    RIO_HPMEVENT_MAX,        /* Value to denote maximum Event IDs */
+};
 
 /* QEMU RISC-V IOMMU Device Emulation Objects */
 
