@@ -28,6 +28,9 @@
 #define MAKE_64BIT_MASK(shift, length) \
     (((~0ULL) >> (64 - (length))) << (shift))
 
+#define MAKE_32BIT_MASK(shift, length) \
+    (((uint32_t)(~0UL) >> (32 - (length))) << (shift))
+
 /**
  * set_bit - Set a bit in memory
  * @nr: the bit to set
