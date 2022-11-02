@@ -663,7 +663,7 @@ static int riscv_iommu_ctx_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx)
 
     if (mode == RIO_PDTP_MODE_BARE) {
         return 0;                       /* No S-Stage translation */
-     }
+    }
 
     if (!(ctx->tc & RIO_DCTC_PDTV)) {
         if (ctx->pasid) {
@@ -1288,7 +1288,8 @@ static void riscv_iommu_process_dbg(RISCVIOMMUState *s)
 {
     uint64_t iova = riscv_iommu_reg_get64(s, RIO_REG_TR_REQ_IOVA);
     uint64_t ctrl = riscv_iommu_reg_get64(s, RIO_REG_TR_REQ_CTRL);
-    unsigned devid = (unsigned)((ctrl >> 16) & ((1UL << 20) - 1));
+    unsigned devid = get_field(ctrl, RIO_TRREQ_MASK_DID);
+    unsigned pid = get_field(ctrl, RIO_TRREQ_MASK_PID);
     RISCVIOMMUContext *ctx;
     void *ref;
 
@@ -1296,7 +1297,7 @@ static void riscv_iommu_process_dbg(RISCVIOMMUState *s)
         return;
     }
 
-    ctx = riscv_iommu_ctx(s, devid, 0, &ref);
+    ctx = riscv_iommu_ctx(s, devid, pid, &ref);
     if (ctx == NULL) {
         riscv_iommu_reg_set64(s, RIO_REG_TR_RESPONSE,
                 RIO_TRRSP_FAULT | (RIO_CAUSE_DMA_DISABLED << 10));
