@@ -363,6 +363,8 @@ static int dce_crypto(DCEState *state,
     /* Parse operand 0 */
     SecAlgo sec_algo = op0_get_sec_algo(descriptor->operand0);
     SecMode sec_mode = op0_get_sec_mode(descriptor->operand0);
+    bool aad_addr_list = op0_get_aad_addr_list(descriptor->operand0);
+    bool iv_addr_list = op0_get_iv_addr_list(descriptor->operand0);
 
     if (sec_mode==GCM) {
         uint8_t * iv_gcm, * aad;
@@ -388,9 +390,9 @@ static int dce_crypto(DCEState *state,
         }
         /* copy over IV and AAD */
         local_buffer_transfer(state, iv_gcm, iv_dma,
-                                iv_len, false, TO_LOCAL, attrs);
+                                iv_len, iv_addr_list, TO_LOCAL, attrs);
         local_buffer_transfer(state, aad, aad_dma,
-                                aad_len, false, TO_LOCAL, attrs);
+                                aad_len, aad_addr_list, TO_LOCAL, attrs);
 
         if (sec_algo == SM4) {
             // SM4-GCM

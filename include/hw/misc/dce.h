@@ -116,7 +116,13 @@ typedef enum {
     GCM=1,
 } SecMode;
 static SecMode op0_get_sec_mode(uint16_t op0){
-    return extract16(op0, 4, 1);
+    return extract16(op0, 1, 1);
+}
+static bool op0_get_aad_addr_list(uint16_t op0){
+    return extract16(op0, 2, 1);
+}
+static bool op0_get_iv_addr_list(uint16_t op0){
+    return extract16(op0, 3, 1);
 }
 #endif
 
