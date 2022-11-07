@@ -283,7 +283,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
             sc[pass].ptesize   = 0;
             break;
         case RIO_ATP_MODE_SV32:
-            if (!(s->cap & (pass ? RIO_CAP_G_SV32 : RIO_CAP_G_SV32))) {
+            if (!(s->cap & (pass ? RIO_CAP_G_SV32 : RIO_CAP_S_SV32))) {
                 return RIO_CAUSE_DDT_UNSUPPORTED;
             }
             sc[pass].levels    = 2;
@@ -291,7 +291,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
             sc[pass].ptesize   = 4;
             break;
         case RIO_ATP_MODE_SV39:
-            if (!(s->cap & (pass ? RIO_CAP_G_SV39 : RIO_CAP_G_SV39))) {
+            if (!(s->cap & (pass ? RIO_CAP_G_SV39 : RIO_CAP_S_SV39))) {
                 return RIO_CAUSE_DDT_UNSUPPORTED;
             }
             sc[pass].levels    = 3;
@@ -299,7 +299,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
             sc[pass].ptesize   = 8;
             break;
         case RIO_ATP_MODE_SV48:
-            if (!(s->cap & (pass ? RIO_CAP_G_SV48 : RIO_CAP_G_SV48))) {
+            if (!(s->cap & (pass ? RIO_CAP_G_SV48 : RIO_CAP_S_SV48))) {
                 return RIO_CAUSE_DDT_UNSUPPORTED;
             }
             sc[pass].levels    = 4;
@@ -307,7 +307,7 @@ static int riscv_iommu_spa_fetch(RISCVIOMMUState *s, RISCVIOMMUContext *ctx,
             sc[pass].ptesize   = 8;
             break;
         case RIO_ATP_MODE_SV57:
-            if (!(s->cap & (pass ? RIO_CAP_G_SV57 : RIO_CAP_G_SV57))) {
+            if (!(s->cap & (pass ? RIO_CAP_G_SV57 : RIO_CAP_S_SV57))) {
                 return RIO_CAUSE_DDT_UNSUPPORTED;
             }
             sc[pass].levels    = 5;
