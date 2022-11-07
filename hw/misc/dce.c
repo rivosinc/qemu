@@ -789,7 +789,7 @@ static void form_pi(uint8_t * pi, PIF_encoding PIF, uint64_t guard, uint64_t at,
         case _32GB:
             insert_bytes(pi, 0, 3, (uint8_t *)&guard);
             insert_bytes(pi, 4, 5, (uint8_t *)&at);
-            insert_bytes(pi, 6, 16, (uint8_t *)&st_rt);
+            insert_bytes(pi, 6, 15, (uint8_t *)&st_rt);
             break;
         case _64GB:
             insert_bytes(pi, 0, 7, (uint8_t *)&guard);
