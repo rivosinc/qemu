@@ -771,7 +771,7 @@ static uint64_t extract_guard(uint8_t * pi, PIF_encoding PIF) {
 }
 
 static void insert_bytes(uint8_t * buffer, int lo, int hi, uint8_t * src) {
-    for (int index = lo; index <= hi; index++) {
+    for (int index = hi; index >= lo; index--) {
         buffer[index] = *src;
         src++;
     }
@@ -864,6 +864,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     }
 
     __uint128_t _96bitmask = MAKE128CONST(0xffffffff, 0xFFFFFFFFFFFFFFFF);
+    __uint128_t _128bit1 = MAKE128CONST(0, 1);
 
     uint64_t crc_poly, pi_size, at_mask;
     __uint128_t ref_tag_mask, st_tag_mask;
@@ -872,21 +873,21 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     if (PIF == _16GB) {
         crc_poly = 0x18BB7;
         pi_size = 8;
-        ref_tag_mask = (STS == 32) ? 0 : ((1 << (32 - STS)) - 1);
+        ref_tag_mask = (STS == 32) ? 0 : ((_128bit1 << (32 - STS)) - 1);
         st_tag_mask = 0xFFFFFFFF ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 16;
     } else if (PIF == _32GB) {
         crc_poly = 0x1EDC6F41;
         pi_size = 16;
-        ref_tag_mask = (STS == 64) ? 0 : ((1 << (64 - STS)) - 1);
+        ref_tag_mask = (STS == 64) ? 0 : ((_128bit1 << (96 - STS)) - 1);
         st_tag_mask = _96bitmask ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 32;
     } else if (PIF == _64GB) {
         crc_poly = 0xAD93D23594C93659ULL;
         pi_size = 16;
-        ref_tag_mask = (STS == 48) ? 0 : ((1 << (48 - STS)) - 1);
+        ref_tag_mask = (STS == 48) ? 0 : ((_128bit1 << (48 - STS)) - 1);
         st_tag_mask = 0xFFFFFFFFFFFF ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 64;
@@ -953,8 +954,8 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
             // If (source_at == all 1’s && PT != TYPE3) ||
             // (source_at == all 1’s && source_rt == all 1’s && PT == TYPE3)
             // skip_checks = 1
-            if (((source_at = at_mask) && (PT != TYPE_3)) ||
-                ((source_at = at_mask) && (source_rt == ref_tag_mask &&
+            if (((source_at == at_mask) && (PT != TYPE_3)) ||
+                ((source_at == at_mask) && (source_rt == ref_tag_mask &&
                 (PT == TYPE_3)))) {
                 skip_checks = true;
             }
@@ -1027,7 +1028,7 @@ clean_up_and_finish_pi:
     free(dst_pi);
 finish_pi:
     /* populate the completion */
-    complete_workload(state, descriptor, err, 0,
+    complete_workload(state, descriptor, err, err,
         num_lba_processed * block_size, attrs);
 
 }
