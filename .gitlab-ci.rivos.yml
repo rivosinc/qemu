@@ -102,7 +102,7 @@ package-deb:
     PKG_LICENSE: "GPL-2.0"
     PKG_UPSTREAM_VERSION: "${GIT_TAG}"
     PKG_DIRECTORIES: "${INSTALL_DIR}"
-    PKG_DEPENDS: "libaio1;libbz2-1.0;libcap2;libcap-ng0;libcurl4;libglib2.0-0;libfdt1;liblzo2-2;libpixman-1-0;libssh2-1;zlib1g"
+    PKG_DEPENDS: "libaio1;libbz2-1.0;libcap2;libcap-ng0;libcurl4;libglib2.0-0;libfdt1;liblzo2-2;libpixman-1-0;libssh2-1;zlib1g;libsnappy1v5"
   before_script:
     - rm -rf "${INSTALL_DIR}"
     - tar -C/ -xzf build/qemu-install.tar.gz
