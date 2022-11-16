@@ -697,9 +697,9 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
 
 static uint64_t extract_bytes(uint8_t * reg, int lo, int hi) {
     uint64_t result = 0;
-    int shift = 0;
+    uint32_t shift = 0;
     for (int curr = hi; curr >= lo; curr--) {
-        result += (reg[curr] << shift);
+        result |= ((uint64_t)reg[curr] << shift);
         shift += 8;
     }
     return result;
@@ -880,7 +880,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     } else if (PIF == _32GB) {
         crc_poly = 0x1EDC6F41;
         pi_size = 16;
-        ref_tag_mask = (STS == 64) ? 0 : ((_128bit1 << (96 - STS)) - 1);
+        ref_tag_mask = (_128bit1 << (96 - STS)) - 1;
         st_tag_mask = _96bitmask ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 32;
@@ -1191,8 +1191,6 @@ static void finish_descriptor(DCEState *state, int WQ_id,
     bool is_priviledged =
         (FIELD_EX64(transctl, DCE_TRANSCTL ,TRANSCTL_SUPV) == 1);
     MemTxAttrs * attrs_to_use = is_priviledged ? &desc_attrs : &transctl_attrs;
-
-    // printf("CTRL and PASID: 0x%x, 0x%x\n", descriptor.ctrl, descriptor.pasid);
 
     //TODO: I think we can do better than pretend it did not happen: Cat2 (or Cat1?)
     if (ret) printf("%s: ERROR: %x\n",__func__, ret);
