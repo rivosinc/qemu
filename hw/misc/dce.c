@@ -597,14 +597,14 @@ static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Widt
         CrcTable[index] = value;
     }
 
-    printf("Printing CRC table:\n");
-    for(int i = 0; i < 32; i++) {
-        for(int j = 0; j < 8; j++) {
-            printf("0x%lx ", CrcTable[i * 8 + j]);
-        }
-        printf("\n");
-    }
-    printf("\n");
+    // printf("Printing CRC table:\n");
+    // for(int i = 0; i < 32; i++) {
+    //     for(int j = 0; j < 8; j++) {
+    //         printf("0x%lx ", CrcTable[i * 8 + j]);
+    //     }
+    //     printf("\n");
+    // }
+    // printf("\n");
 }
 
 static uint64_t CalculateCRC(uint8_t* Buffer, uint64_t Length, uint64_t* CrcTable,
@@ -873,7 +873,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     if (PIF == _16GB) {
         crc_poly = 0x18BB7;
         pi_size = 8;
-        ref_tag_mask = (STS == 32) ? 0 : ((_128bit1 << (32 - STS)) - 1);
+        ref_tag_mask = ((_128bit1 << (32 - STS)) - 1);
         st_tag_mask = 0xFFFFFFFF ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 16;
@@ -887,7 +887,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     } else if (PIF == _64GB) {
         crc_poly = 0xAD93D23594C93659ULL;
         pi_size = 16;
-        ref_tag_mask = (STS == 48) ? 0 : ((_128bit1 << (48 - STS)) - 1);
+        ref_tag_mask = ((_128bit1 << (48 - STS)) - 1);
         st_tag_mask = 0xFFFFFFFFFFFF ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 64;
@@ -1013,6 +1013,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
             at = ATI ? dst_at : exp_at;
             rt = PRI ? dst_rt : exp_rt;
             st = STI ? dst_st : exp_st;
+
             form_pi(dst_pi, PIF, source_guard, at, st, rt);
             // write(desc.bfr2, pi_size, dst_pi);
             pci_dma_rw(&state->dev, bfr2, dst_pi, pi_size,
