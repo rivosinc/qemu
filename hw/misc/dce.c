@@ -863,7 +863,7 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
         goto finish_pi;
     }
 
-    __uint128_t _96bitmask = MAKE128CONST(0xffffffff, 0xFFFFFFFFFFFFFFFF);
+    __uint128_t _80bitmask = MAKE128CONST(0xFFFF, 0xFFFFFFFFFFFFFFFF);
     __uint128_t _128bit1 = MAKE128CONST(0, 1);
 
     uint64_t crc_poly, pi_size, at_mask;
@@ -880,8 +880,8 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
     } else if (PIF == _32GB) {
         crc_poly = 0x1EDC6F41;
         pi_size = 16;
-        ref_tag_mask = (_128bit1 << (96 - STS)) - 1;
-        st_tag_mask = _96bitmask ^ ref_tag_mask;
+        ref_tag_mask = (_128bit1 << (80 - STS)) - 1;
+        st_tag_mask = _80bitmask ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 32;
     } else if (PIF == _64GB) {
