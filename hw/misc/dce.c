@@ -9,6 +9,7 @@
 #include "hw/hw.h"
 #include "hw/misc/dce.h"
 #include "qemu/atomic.h"
+#include "hw/pci/msix.h"
 #include <signal.h>
 #include <stdint.h>
 // #include "hw/riscv/riscv_hart.h" FIXME
@@ -44,6 +45,7 @@
 typedef struct DCEState
 {
     PCIDevice dev;
+    MemoryRegion msix;
     MemoryRegion mmio;
 
     uint8_t regs_rw[128][DCE_PAGE_SIZE];  /* 512 Kib MMIO register state */
@@ -76,9 +78,9 @@ typedef struct DCEState
     uint32_t arb_weight_sum;
 } DCEState;
 
-static bool dce_msi_enabled(DCEState *state)
+static bool dce_msix_enabled(DCEState *state)
 {
-    return msi_enabled(&state->dev);
+    return msix_enabled(&state->dev);
 }
 
 static void dce_raise_interrupt(DCEState *state, int WQ_id,
@@ -92,8 +94,8 @@ static void dce_raise_interrupt(DCEState *state, int WQ_id,
     stq_le_p(&state->regs_rw[WQMCC][DCE_REG_WQIRQSTS], irq_status);
     // irq_status |= BIT(val);
     if (irq_status) {
-        if (dce_msi_enabled(state)) {
-            msi_notify(&state->dev, 0);
+        if (dce_msix_enabled(state)) {
+            msix_notify(&state->dev, 0);
         }
     }
 }
@@ -116,8 +118,8 @@ static bool aligned(hwaddr addr, unsigned size)
 static inline bool interrupt_on_completion(DCEState *state,
                                            struct DCEDescriptor *descriptor)
 {
-    // printf("ctrl is 0x%x\n", descriptor->ctrl);
-    // printf("MSI enabled? %d\n", dce_msi_enabled(state));
+    printf("ctrl is 0x%x\n", descriptor->ctrl);
+    printf("MSI-X enabled? %d\n", dce_msix_enabled(state));
     return (descriptor->ctrl & 1);
 }
 
@@ -1540,6 +1542,46 @@ static void *dce_core_proc(void* arg)
     return NULL;
 }
 
+static void dce_uninit_msix(PCIDevice *pdev, int used_vectors)
+{
+    DCEState *dev = DO_UPCAST(DCEState, dev, pdev);
+    int i;
+
+    for (i = 0; i < used_vectors; i++) {
+        msix_vector_unuse(pdev, i);
+    }
+
+    msix_uninit(pdev, &dev->mmio, &dev->mmio);
+}
+
+static int dce_init_msix(PCIDevice *pdev)
+{
+    DCEState *dev = DO_UPCAST(DCEState, dev, pdev);
+    int i;
+    int rc;
+
+    uint64_t MSIX_TABLE_OFFSET = 65 * DCE_PAGE_SIZE;
+
+    rc = msix_init(pdev, 1, &dev->mmio, DCE_MMIO_BAR_IDX,
+                   MSIX_TABLE_OFFSET, &dev->mmio, DCE_MMIO_BAR_IDX,
+                   MSIX_TABLE_OFFSET + 0x2000, 0, NULL);
+
+    if (rc < 0) {
+        printf("Failed to initialize MSI-X: %d\n", rc);
+        return rc;
+    }
+
+    for (i = 0; i < DCE_NUM_INTERRUPTS; i++) {
+        rc = msix_vector_use(PCI_DEVICE(dev), i);
+        if (rc < 0) {
+            printf("Fail mark MSI-X vector %d\n", i);
+            dce_uninit_msix(pdev, i);
+            return rc;
+        }
+    }
+    return 0;
+}
+
 #include "qemu/units.h"
 static void dce_realize(PCIDevice *dev, Error **errp)
 {
@@ -1550,10 +1592,11 @@ static void dce_realize(PCIDevice *dev, Error **errp)
 
     pci_config_set_interrupt_pin(dev->config, 1);
 
+    /* BAR 0 - MMIO Registers */
     memory_region_init_io(&state->mmio, OBJECT(state),
         &dce_mmio_ops, state, "dce-mmio", 512 * KiB);
-    // printf("dce mmio: 0x%lx \n",state->mmio.addr);
-    pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
+    pci_register_bar(dev, DCE_MMIO_BAR_IDX, PCI_BASE_ADDRESS_SPACE_MEMORY,
+        &state->mmio);
 
     /* Mark all registers read-only */
     memset(state->regs_ro, 0xff, sizeof(state->regs_ro));
@@ -1566,14 +1609,15 @@ static void dce_realize(PCIDevice *dev, Error **errp)
         stw_le_p(&state->regs_ro[i][DCE_REG_WQCR], 0);
     }
 
-    int ret = pcie_endpoint_cap_init(dev, 0xa0);
-    if (ret < 0) {
+    /* TODO: Actually FAIL */
+    if (dce_init_msix(dev) < 0) {
+        printf("MSI-X init FAILED");
+    }
+
+    if (pcie_endpoint_cap_init(dev, 0xa0) < 0) {
         printf("caps INIT FAILED\n");
     }
-    ret = msi_init(&state->dev, 0, 1, true, false, errp);
-    if (ret != 0) {
-        printf("MSI INIT FAILED\n");
-    }
+
     pcie_ari_init(dev, PCI_CONFIG_SPACE_SIZE, 1);
 
     /* PASID capability */
@@ -1586,9 +1630,9 @@ static void dce_realize(PCIDevice *dev, Error **errp)
                        PCI_DEVICE_ID_RIVOS_DCE_VF, DCE_TOTAL_VFS, DCE_TOTAL_VFS,
                        DCE_VF_OFFSET, DCE_VF_STRIDE);
 
-    /* 3.5 MiB of VFBAR */
-    pcie_sriov_pf_init_vf_bar(dev, 0, PCI_BASE_ADDRESS_MEM_TYPE_64 ,
-                              0x380000);
+    /* VF-BAR setup */
+    pcie_sriov_pf_init_vf_bar(dev, DCE_MMIO_BAR_IDX, PCI_BASE_ADDRESS_MEM_TYPE_64 ,
+                              512 * KiB * DCE_TOTAL_VFS);
 
     state->pfstate = state;
     state->isVF = false;
@@ -1625,20 +1669,20 @@ static void dcevf_realize(PCIDevice *dev, Error **errp)
     vfstate->isVF = true;
     vfstate->vfnum = vfnum;
 
-    MemoryRegion *mr = &vfstate->mmio;
+    /* BAR 0 - MMIO Registers */
+    memory_region_init_io(&vfstate->mmio, OBJECT(vfstate),
+        &dce_mmio_ops, vfstate, "dce-mmio", 512 * KiB);
+    pcie_sriov_vf_register_bar(dev, DCE_MMIO_BAR_IDX, &vfstate->mmio);
 
-    memory_region_init_io(mr, OBJECT(vfstate), &dce_mmio_ops, vfstate,
-            "dcevf-mmio", 512 * KiB);
-    pcie_sriov_vf_register_bar(dev, 0, mr);
+    /* TODO: Actually FAIL */
+    if (dce_init_msix(dev) < 0) {
+        printf("MSI-X init FAILED");
+    }
 
-    int ret = pcie_endpoint_cap_init(dev, 0xa0);
-    if (ret < 0) {
-        printf("VF error: cap\n");
+    if (pcie_endpoint_cap_init(dev, 0xa0) < 0) {
+        printf("caps INIT FAILED\n");
     }
-    ret = msi_init(&vfstate->dev, 0, 1, true, false, errp);
-    if (ret != 0) {
-        printf("MSI INIT FAILED\n");
-    }
+
     pcie_ari_init(dev, 0x100, 1);
 
     qemu_cond_init(&vfstate->core_cond);
