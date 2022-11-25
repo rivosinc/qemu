@@ -686,11 +686,11 @@ static void dce_crc(DCEState *state, struct DCEDescriptor *descriptor,
         reflect(&crc, bit_width);
     }
 
-    complete_workload(state, descriptor, err, 0, size_adjusted, attrs);
     /* write the CRC into completion */
-    if (!err)
+    if (!err) /*TODO: Check error on transfer, Cat2 */
         pci_dma_rw(&state->dev, descriptor->completion + 8,
         &crc, 8, DMA_DIRECTION_FROM_DEVICE, *attrs);
+    complete_workload(state, descriptor, err, 0, size_adjusted, attrs);
 }
 
 #define MAKE128CONST(hi,lo) ((((__uint128_t)hi << 64) | lo))
@@ -1435,6 +1435,7 @@ static void process_wqs(DCEState * state) {
                 finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
                 //TODO: Update head on job completion?
+                //TODO: before interrupt currently done in finish_descriptor
             }
             pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
                 &head, 8, DMA_DIRECTION_FROM_DEVICE, attrs);
