@@ -1434,11 +1434,10 @@ static void process_wqs(DCEState * state) {
                 printf("Job queue %d: Starting job at index %"PRIx64"\n", i, head_mod);
                 finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
-                //TODO: Update head on job completion?
-                //TODO: before interrupt currently done in finish_descriptor
+                // TODO: interrupt triggered before head update, is this correct ?
+                pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
+                    &head, 8, DMA_DIRECTION_FROM_DEVICE, attrs);
             }
-            pci_dma_rw(&state->dev, WQITEs[i].DSCPTA,
-                &head, 8, DMA_DIRECTION_FROM_DEVICE, attrs);
         }
         /* set the WQ back to idle if we finished the job */
         if (head == tail) {
