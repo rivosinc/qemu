@@ -190,7 +190,7 @@ stdenv.mkDerivation rec {
 
   postPatch = ''
     # Otherwise tries to ensure /var/run exists.
-    sed -i "/install_subdir('run', install_dir: get_option('localstatedir'))/d" \
+    sed -i "/install_emptydir(get_option('localstatedir') \/ 'run')/d" \
         qga/meson.build
 
     # glibc 2.33 compat fix: if `has_statx = true` is set, `tools/virtiofsd/passthrough_ll.c` will
