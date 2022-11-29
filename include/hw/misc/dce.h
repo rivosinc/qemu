@@ -188,6 +188,7 @@ REG32(DCE_WQCR,     96)
     FIELD(DCE_WQCR, STATUS, 16, 1)
 
 #define WQMCC                       0
+#define MSIX_PAGE                   65
 #define GLOB_CONF                   127
 
 REG64(DCE_TRANSCTL, 0)

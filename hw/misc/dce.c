@@ -45,7 +45,6 @@
 typedef struct DCEState
 {
     PCIDevice dev;
-    MemoryRegion msix;
     MemoryRegion mmio;
 
     uint8_t regs_rw[128][DCE_PAGE_SIZE];  /* 512 Kib MMIO register state */
@@ -1560,11 +1559,12 @@ static int dce_init_msix(PCIDevice *pdev)
     int i;
     int rc;
 
-    uint64_t MSIX_TABLE_OFFSET = 65 * DCE_PAGE_SIZE;
+    uint64_t MSIX_TABLE_OFFSET = MSIX_PAGE * DCE_PAGE_SIZE;
+    uint64_t MSIX_TABLE_SIZE = 16;
 
     rc = msix_init(pdev, 1, &dev->mmio, DCE_MMIO_BAR_IDX,
                    MSIX_TABLE_OFFSET, &dev->mmio, DCE_MMIO_BAR_IDX,
-                   MSIX_TABLE_OFFSET + 0x2000, 0, NULL);
+                   MSIX_TABLE_OFFSET + MSIX_TABLE_SIZE, 0, NULL);
 
     if (rc < 0) {
         printf("Failed to initialize MSI-X: %d\n", rc);
