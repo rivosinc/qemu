@@ -1059,19 +1059,7 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
     const SecMode mode =  op0_get_sec_mode(descriptor->operand0);
 
     if (is_crypto){
-        /* crypto, dest size == src size */
-        if(mode == XTS){ //XTS inspired XEX mode
-            //ciphertext is larger than cleartext
-            const size_t ciph_size = (job_size+15)&~0xF;
-            if(is_enc)
-                dest_size = ciph_size;
-            else if(is_dec){
-                src_size = ciph_size;
-                dest_size = job_size;
-            }
-        }
-        else
-            dest_size = src_size;
+        dest_size = src_size;
     }
     else
 #endif
