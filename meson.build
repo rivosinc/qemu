@@ -555,13 +555,6 @@ if have_system or have_tools
 endif
 zlib = dependency('zlib', required: true, kwargs: static_kwargs)
 
-libaio = not_found
-if not get_option('linux_aio').auto() or have_block
-  libaio = cc.find_library('aio', has_headers: ['libaio.h'],
-                           required: get_option('linux_aio'),
-                           kwargs: static_kwargs)
-endif
-
 dce_crypto = not_found
 if not get_option('dce_crypto').auto() or have_block
   dce_crypto = cc.find_library('dce_crypto',
@@ -581,6 +574,13 @@ if not get_option('openssl').auto() or have_system
   openssl = dependency('openssl', version: '>=1.1.1f',
                     required: get_option('openssl'),
                     method: 'pkg-config', kwargs: static_kwargs)
+endif
+
+libaio = not_found
+if not get_option('linux_aio').auto() or have_block
+  libaio = cc.find_library('aio', has_headers: ['libaio.h'],
+                           required: get_option('linux_aio'),
+                           kwargs: static_kwargs)
 endif
 
 linux_io_uring_test = '''
@@ -1875,10 +1875,10 @@ config_host_data.set('CONFIG_LIBDAXCTL', libdaxctl.found())
 config_host_data.set('CONFIG_LIBISCSI', libiscsi.found())
 config_host_data.set('CONFIG_LIBNFS', libnfs.found())
 config_host_data.set('CONFIG_LIBSSH', libssh.found())
-config_host_data.set('CONFIG_LINUX_AIO', libaio.found())
 config_host_data.set('CONFIG_DCE_COMPRESSION', lz4.found() and zlib.found() and zstd.found() and snappy.found())
 config_host_data.set('CONFIG_DCE_CRYPTO', dce_crypto.found())
 config_host_data.set('CONFIG_OPENSSL', openssl.found())
+config_host_data.set('CONFIG_LINUX_AIO', libaio.found())
 config_host_data.set('CONFIG_LINUX_IO_URING', linux_io_uring.found())
 config_host_data.set('CONFIG_LIBPMEM', libpmem.found())
 config_host_data.set('CONFIG_NUMA', numa.found())
