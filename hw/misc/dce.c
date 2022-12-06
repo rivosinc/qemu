@@ -892,6 +892,9 @@ static void dce_pi(DCEState *state, struct DCEDescriptor *descriptor,
         st_tag_mask = 0xFFFFFFFFFFFF ^ ref_tag_mask;
         at_mask = (1 << ATS) - 1;
         crc_width = 64;
+    } else {
+        /* FIXME: unreachable code ? */
+        return;
     }
 
     uint64_t crc_table[256];
@@ -1529,18 +1532,6 @@ static void *dce_core_proc(void* arg)
     return NULL;
 }
 
-static void dce_uninit_msix(PCIDevice *pdev, int used_vectors)
-{
-    DCEState *dev = DO_UPCAST(DCEState, dev, pdev);
-    int i;
-
-    for (i = 0; i < used_vectors; i++) {
-        msix_vector_unuse(pdev, i);
-    }
-
-    msix_uninit(pdev, &dev->mmio, &dev->mmio);
-}
-
 static int dce_init_msix(PCIDevice *pdev)
 {
     DCEState *dev = DO_UPCAST(DCEState, dev, pdev);
@@ -1560,12 +1551,7 @@ static int dce_init_msix(PCIDevice *pdev)
     }
 
     for (i = 0; i < DCE_NUM_INTERRUPTS; i++) {
-        rc = msix_vector_use(PCI_DEVICE(dev), i);
-        if (rc < 0) {
-            printf("Fail mark MSI-X vector %d\n", i);
-            dce_uninit_msix(pdev, i);
-            return rc;
-        }
+        msix_vector_use(PCI_DEVICE(dev), i);
     }
     return 0;
 }
