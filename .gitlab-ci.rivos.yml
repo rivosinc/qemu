@@ -89,8 +89,8 @@ centos7-build:
     paths:
       - build/qemu-centos7.tar.gz
     expire_in: 3h
-  rules:
-    - if: $CI_COMMIT_BRANCH
+  except:
+    - pipelines
 
 package-deb:
   extends: .deploy-deb
@@ -139,4 +139,7 @@ nix-build:
     - push-rivos-cache ${INSTALLABLES}
   after_script:
     - git config --global --unset url."${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}:${CI_SERVER_PORT}".insteadOf
+  except:
+    - pipelines
+
 
