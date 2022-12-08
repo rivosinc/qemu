@@ -87,7 +87,7 @@ static void dce_raise_interrupt(DCEState *state, int WQ_id,
 {
     /* TODO: support other interrupts */
     /* TODO: lock */
-    printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
+    //TRACE printf("Issuing interrupt for WQ %d, %d!\n", WQ_id, val);
     uint64_t irq_status = ldq_le_p(&state->regs_rw[WQMCC][DCE_REG_WQIRQSTS]);
     irq_status |= BIT(WQ_id);
     stq_le_p(&state->regs_rw[WQMCC][DCE_REG_WQIRQSTS], irq_status);
@@ -117,8 +117,8 @@ static bool aligned(hwaddr addr, unsigned size)
 static inline bool interrupt_on_completion(DCEState *state,
                                            struct DCEDescriptor *descriptor)
 {
-    printf("ctrl is 0x%x\n", descriptor->ctrl);
-    printf("MSI-X enabled? %d\n", dce_msix_enabled(state));
+    //TRACE printf("ctrl is 0x%x\n", descriptor->ctrl);
+    //TRACE printf("MSI-X enabled? %d\n", dce_msix_enabled(state));
     return (descriptor->ctrl & 1);
 }
 
@@ -399,14 +399,14 @@ static int dce_crypto(DCEState *state,
             // SM4-GCM
             uint8_t key[16]; //16 for SM4
             memcpy(key, state->keys[sec_kid], 16);
-            printf("Using SM4-GCM\n");
+            // printf("Using SM4-GCM\n");
             ret = dce_sm4_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
                         src, dest, size, tag);
         } else if (sec_algo == AES) {
             // AES-GCM
             uint8_t key[32]; // 32 for AES256
             memcpy(key, state->keys[sec_kid], 32);
-            printf("Using AES-GCM\n");
+            //printf("Using AES-GCM\n");
             ret = dce_aes_gcm(key, decrypt, iv_gcm, iv_len, aad, aad_len,
                         src, dest, size, tag);
         } else {
@@ -442,7 +442,7 @@ static int dce_crypto(DCEState *state,
 
         if (sec_algo==SM4) {
             // SM4-XTS
-            printf("Using SM4-XTS\n");
+            //printf("Using SM4-XTS\n");
             /* setup the encryption keys*/
             uint8_t key[32];
             memcpy(key, state->keys[sec_kid], 16);
@@ -452,7 +452,7 @@ static int dce_crypto(DCEState *state,
         }
         else if (sec_algo == AES){
             // AES-XTS
-            printf("Using AES-XTS\n");
+            //printf("Using AES-XTS\n");
             /* setup the encryption keys*/
             uint8_t key[64];
             memcpy(key, state->keys[sec_kid], 32);
@@ -580,7 +580,7 @@ static void reflect_buffer(uint8_t * buffer, size_t size) {
 
 static void CreateCRCtable(uint64_t* CrcTable, uint64_t Polynomial, uint8_t Width)
 {
-    printf("Generating CRC table with width %u, Polynomial 0x%lx\n", Width, Polynomial);
+    //TRACE printf("Generating CRC table with width %u, Polynomial 0x%lx\n", Width, Polynomial);
     uint64_t index;
     uint64_t value;
     uint8_t cnt;
@@ -1105,13 +1105,13 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
         case DCE_OPCODE_ENCRYPT:
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, job_size, ENCRYPT, attrs);
-            printf("Encrypted %ld bytes\n", post_process_size);
+            // printf("Encrypted %ld bytes\n", post_process_size);
             break;
         case DCE_OPCODE_DECRYPT:
 
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, job_size, DECRYPT, attrs);
-            printf("Decrypted %ld bytes\n", post_process_size);
+            // printf("Decrypted %ld bytes\n", post_process_size);
             break;
         default:
             /* TODO add error code */
@@ -1187,7 +1187,7 @@ static void finish_descriptor(DCEState *state, int WQ_id,
 
     //TODO: I think we can do better than pretend it did not happen: Cat2 (or Cat1?)
     if (ret) printf("%s: ERROR: %x\n",__func__, ret);
-    printf("Processing descriptor with opcode %d\n", descriptor.opcode);
+    //printf("Processing descriptor with opcode %d\n", descriptor.opcode);
 
     switch (descriptor.opcode) {
         case DCE_OPCODE_MEMCPY:
@@ -1239,7 +1239,7 @@ DECLARE_INSTANCE_CHECKER(DCEState, DCE, TYPE_PCI_DCE_DEVICE)
 
 static uint64_t dce_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    printf("in %s, addr: 0x%lx\n", __func__, addr);
+    //TRACE printf("in %s, addr: 0x%lx\n", __func__, addr);
     assert(aligned(addr, size));
 
     DCEState *s = (DCEState*) opaque;
@@ -1423,7 +1423,7 @@ static void process_wqs(DCEState * state) {
                     (head_mod * sizeof(DCEDescriptor));
                 // printf("processing descriptor 0x%lx\n", descriptor_addr);
                 /* Actually process the descriptor */
-                printf("Job queue %d: Starting job at index %"PRIx64"\n", i, head_mod);
+                //TRACE printf("Job queue %d: Starting job at index %"PRIx64"\n", i, head_mod);
                 finish_descriptor(state, i, descriptor_addr, WQITEs[i].TRANSCTL);
                 head++;
                 // TODO: interrupt triggered before head update, is this correct ?
