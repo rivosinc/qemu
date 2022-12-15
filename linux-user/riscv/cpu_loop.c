@@ -116,7 +116,8 @@ void cpu_loop(CPURISCVState *env)
                 } else if (m5op_num == M5OP_WORK_END) {
                     checkpoint_work_end(cs, &ckpt);
                 } else if (m5op_num == M5OP_CHECKPOINT) {
-                    EXCP_DUMP(env, "\nqemu: m5op checkpoint unimplemented - aborting\n");
+                    EXCP_DUMP(env, "\nqemu: m5op checkpoint unimplemented - aborting\n",
+                              trapnr);
                     exit(EXIT_FAILURE);
                 }
                 qemu_plugin_vcpu_m5op_cb(cs, m5op_num);
