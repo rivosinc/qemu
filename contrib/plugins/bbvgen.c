@@ -483,7 +483,7 @@ int qemu_plugin_install(qemu_plugin_id_t id, const qemu_info_t *info,
         }
     }
 
-    if (bbv_path == NULL && bbvi_path == NULL) {
+    if (!bbv_path[0] && !bbvi_path[0]) {
         fprintf(stderr, "bbvgen: at least one of {\"bbv=<path>\", \"bbvi=<path>\"} arguments must be supplied\n");
         return -1;
     }
