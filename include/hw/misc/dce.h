@@ -155,14 +155,15 @@ enum {
     DCE_EXEC_LAST
 };
 
-typedef struct __attribute__((packed)) WQITE {
+typedef struct __attribute__((packed, aligned(64))) WQITE {
     uint64_t DSCBA;
-    uint8_t  DSCSZ;
     uint64_t DSCPTA;
+    uint8_t  DSCSZ;
+    uint8_t  padding[3];
     uint32_t TRANSCTL;
     uint64_t WQ_CTX_SAVE_BA;
     // TBA: key slot management
-} __attribute__((packed)) WQITE;
+} WQITE;
 
 // WQCR
 REG32(DCE_WQCR,     96)
