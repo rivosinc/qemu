@@ -419,19 +419,20 @@ static int dce_crypto(DCEState *state,
     else if(sec_mode==XTS){
         uint8_t iv_xts[16];
         /*
-         * |  Byte 3  |   Byte 2   |   Byte 1  |  Byte 0 |
-         * | HASH KID | TWEAKIV ID | TWEAK KID | SEC KID |
+         *    Byte 1  |  Byte 0 |
+         *  TWEAK KID | SEC KID |
          */
         uint8_t sec_kid = key_ids[0];
         uint8_t tweak_kid = key_ids[1];
-        uint8_t iv_kid = key_ids[2];
         if(  sec_kid   >= NUM_KEY_SLOTS
-          || tweak_kid >= NUM_KEY_SLOTS
-          || iv_kid    >= NUM_KEY_SLOTS){
+          || tweak_kid >= NUM_KEY_SLOTS){
             return -129;
         }
-        /* setting up IV */
-        memcpy(iv_xts, state->keys[iv_kid], 16);
+        /* setting up IV
+         * copy from op2 and op4
+         * Always le repr so memcpy is fine */
+        memcpy(iv_xts  , &descriptor->operand2, 8);
+        memcpy(iv_xts+8, &descriptor->operand4, 8);
 
         if (sec_algo==SM4) {
             // SM4-XTS
