@@ -1229,7 +1229,7 @@ void pci_register_bar(PCIDevice *pci_dev, int region_num,
                       uint8_t type, MemoryRegion *memory)
 {
     PCIIORegion *r;
-    volatile uint32_t addr; /* offset in pci config space */
+    uint32_t addr; /* offset in pci config space */
     uint64_t wmask;
     pcibus_t size = memory_region_size(memory);
     uint8_t hdr_type;
