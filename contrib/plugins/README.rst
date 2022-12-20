@@ -2,7 +2,22 @@
 Rivos QEMU Profiling Plugins
 ============================
 
-This directory contains a set of qemu plugins which can be used for profiling an application running in qemu.  These plugins are built and included in the rivos-sdk by default.
+This directory contains a set of qemu plugins which can be used for profiling an application running in qemu.  These plugins are built and included in the rivos-sdk by default.  Many of the extensions are provided by upstream qemu, and are `publicly documented <https://www.qemu.org/docs/master/devel/tcg-plugins.html>`_.
+
+The three plugins which we have either added or substaintially changed are: `bbvgen`, `cache`, and `pctrace`.
+
+bbvgen
+  A tool for collecting "basic block vectors" in the format defined by the `simpoint <https://cseweb.ucsd.edu/~calder/simpoint/>`_ tool.  Used to feed `our copy of simpoint <https://gitlab.ba.rivosinc.com/rv/sw/ext/simpoint>`_ when generating snapshots for analysis with gem5.  Also collects a json file with various adhoc statistics and information.  (See example usage below.)
+
+cache
+  A tool for modeling cache access behavior inside a qemu run.  Many of the cache parameters are runtime configurable, but we have also made changes to extend the simulators cache architecture.
+
+pctrace
+  A tool for collecting a full execution trace of a running program.  The output file is a gzipped text file whose format is defined below.
+
+
+Basic Usage
+-----------
 
 Step 0
 ======
@@ -43,3 +58,52 @@ A couple of potential gotchas here:
 
 * Both options (bbv, and bbvi) are required despite the fact we only care about one.  The order of appearance in the command line also appears important.
 * Make sure you include the ".gz" suffix.  At least on Ubuntu 20.04 LTS, the default archive tool things the file is corrupt if you don't.
+
+
+Output Formats
+--------------
+
+bbvgen bbv
+==========
+
+The format of this file is defined to match the input format of the `simpoint <https://cseweb.ucsd.edu/~calder/simpoint/>` tool.
+
+bbvgen bbvi
+===========
+
+This is an adhoc collection of statistics and information in (gzipped) JSON format.
+
+pctrace
+=======
+
+The pctrace output format is a gzipped text file whose contents look like the following:
+
+.. code-block::
+
+  0x0000000000010c30    022000ef          jal             ra,34           # 0x10c52
+  0x0000000000010c52    00065197          auipc           gp,413696       # 0x75c52
+  0x0000000000010c56    43e18193          addi            gp,gp,1086
+  0x0000000000010c5a    8082              ret
+  0x0000000000010c34    87aa              mv              a5,a0
+  0x0000000000010c36    00000517          auipc           a0,0            # 0x10c36
+  0x0000000000010c3a    8c850513          addi            a0,a0,-1848
+  0x0000000000010c3e    6582              ld              a1,0(sp)
+  0x0000000000010c40    0030              addi            a2,sp,8
+  0x0000000000010c42    ff017113          andi            sp,sp,-16
+  0x0000000000010c46    4681              mv              a3,zero
+  0x0000000000010c48    4701              mv              a4,zero
+  0x0000000000010c4a    880a              mv              a6,sp
+  0x0000000000010c4c    4ab010ef          jal             ra,7338         # 0x128f6
+  0x00000000000128f6    00158713          addi            a4,a1,1
+  0x00000000000128fa    7159              addi            sp,sp,-112
+  0x00000000000128fc    070e              slli            a4,a4,3
+
+The fields from left to right are: address of instruction (PC), bytes of instruction, and disassembled form.
+
+This example was collected via the following command:
+
+.. code-block:: console
+
+  /rivos/qemu/bin/qemu-riscv64 -plugin /rivos/qemu/plugins/libpctrace.so,out=$PWD/trace ./coremark.riscv 0 0 0 100
+
+*Note the use of a much smaller iteration count*.  Collecting a full trace is quite slow, and the resulting files are massive.
