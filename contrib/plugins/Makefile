@@ -23,6 +23,7 @@ NAMES += cache
 NAMES += drcov
 
 NAMES += bbvgen pctrace
+NAMES += insn
 LDLIBS += -lz
 
 SONAMES := $(addsuffix .so,$(addprefix lib,$(NAMES)))

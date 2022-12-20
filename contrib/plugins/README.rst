@@ -12,6 +12,9 @@ bbvgen
 cache
   A tool for modeling cache access behavior inside a qemu run.  Many of the cache parameters are runtime configurable, but we have also made changes to extend the simulators cache architecture.
 
+insn
+  A tool for counting dynamic instruction count and size histograms.  Copied from upstream tests/plugin without changes.
+
 pctrace
   A tool for collecting a full execution trace of a running program.  The output file is a gzipped text file whose format is defined below.
 
@@ -42,9 +45,35 @@ Our example program will be coremark.
   /rivos/qemu/bin/qemu-riscv64 ./coremark.riscv 0 0 0 40000
 
 You can download this binary from the `coremark CI repo <https://gitlab.ba.rivosinc.com/rv/sandbox/adlr/coremark/-/jobs/422081>`_.  This links to a specific build revision; you may wish to grab a newer build.
-  
+
 Collecting Dynamic Instruction Count
 ====================================
+
+The insn plugin can be used to count the number of dynamic instructions executed.
+
+.. code-block:: console
+
+  /rivos/qemu/bin/qemu-riscv64 -plugin /home/preames/rivos-qemu/build/contrib/plugins/libinsn.so,inline=true -d plugin ./coremark.riscv 0 0 0 6000
+
+Note that this example is not thread safe; to get reliable counts on multi threaded applications you need to remove "inline=true", but that also causes *much* slower runtimes.
+
+Collecting Instruction Size Histogram
+=====================================
+
+The insn plugin can also print a summary of the sizes (in bytes) of executed instructions.  This is helpful when you're interested in e.g. compressed instruction usage.
+
+.. code-block:: console
+
+  /rivos/qemu/bin/qemu-riscv64 -plugin /home/preames/rivos-qemu/build/contrib/plugins/libinsn.so,inline=true,sizes=true -d plugin ./coremark.riscv 0 0 0 6000
+
+Sample output::
+
+  len 2 bytes: 5380 insns
+  len 4 bytes: 4231 insns
+
+  
+Collecting Dynamic Instruction Count (Altenate Version)
+=======================================================
 
 The bvvgen plugin collects (among many other details) the dynamic instruction count of the executed program.
 
