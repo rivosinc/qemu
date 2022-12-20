@@ -174,4 +174,8 @@ config VIRT_CTRL
 config LASI
     bool
 
+config RIVOS_DCE
+    bool
+    depends on RISCV_IOMMU
+
 source macio/Kconfig
