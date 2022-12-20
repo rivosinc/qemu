@@ -88,6 +88,58 @@ A couple of potential gotchas here:
 * Both options (bbv, and bbvi) are required despite the fact we only care about one.  The order of appearance in the command line also appears important.
 * Make sure you include the ".gz" suffix.  At least on Ubuntu 20.04 LTS, the default archive tool things the file is corrupt if you don't.
 
+Using pctrace for adhoc workflows
+=================================
+
+The `pctrace` plugin gives a building block from which many adhoc flows can be constructed.  The pctrace output format is a gzipped text file whose contents look like the following:
+
+.. code-block::
+
+  0x0000000000010c30    022000ef          jal             ra,34           # 0x10c52
+  0x0000000000010c52    00065197          auipc           gp,413696       # 0x75c52
+  0x0000000000010c56    43e18193          addi            gp,gp,1086
+  0x0000000000010c5a    8082              ret
+  0x0000000000010c34    87aa              mv              a5,a0
+  0x0000000000010c36    00000517          auipc           a0,0            # 0x10c36
+  0x0000000000010c3a    8c850513          addi            a0,a0,-1848
+  0x0000000000010c3e    6582              ld              a1,0(sp)
+  0x0000000000010c40    0030              addi            a2,sp,8
+  0x0000000000010c42    ff017113          andi            sp,sp,-16
+  0x0000000000010c46    4681              mv              a3,zero
+  0x0000000000010c48    4701              mv              a4,zero
+  0x0000000000010c4a    880a              mv              a6,sp
+  0x0000000000010c4c    4ab010ef          jal             ra,7338         # 0x128f6
+  0x00000000000128f6    00158713          addi            a4,a1,1
+  0x00000000000128fa    7159              addi            sp,sp,-112
+  0x00000000000128fc    070e              slli            a4,a4,3
+
+The fields from left to right are: address of instruction (PC), bytes of instruction, and disassembled form.
+
+This example was collected via the following command:
+
+.. code-block:: console
+
+  /rivos/qemu/bin/qemu-riscv64 -plugin /rivos/qemu/plugins/libpctrace.so,out=$PWD/trace ./coremark.riscv 0 0 0 100
+
+*Note the use of a much smaller iteration count*.  Collecting a full trace is quite slow, and the resulting files are massive.  The compressed trace files are roughly 90-120MB per minute of execution.  The uncompressed form is around 10GB per execution minute.
+
+Let's run through some sample commands.  All of these assume that you have uncompressed the trace, and that the resulting textual tracefile is called `data`.
+
+.. code-block:: console
+
+  # To (very slowly) get the dynamic instruction count
+  $ wc data
+
+  # to count the number of unique PCs executed
+  $ sort data | uniq | wc
+
+  # To count how many times each opcode was executed
+  $ cat data | tr -s ' ' | cut -f 3 -d ' ' | sort | uniq -c
+
+  # Show a poorman's profile (by instruction count)
+  cat data | sort | uniq -c
+
+The last command deserves a special callout.  It displays a textual output which prefixes each unique assembly line (in pc order) with the number of times it was executed.  This is very useful for quickly identifying hot regions in programs.
 
 Output Formats
 --------------
@@ -128,11 +180,3 @@ The pctrace output format is a gzipped text file whose contents look like the fo
   0x00000000000128fc    070e              slli            a4,a4,3
 
 The fields from left to right are: address of instruction (PC), bytes of instruction, and disassembled form.
-
-This example was collected via the following command:
-
-.. code-block:: console
-
-  /rivos/qemu/bin/qemu-riscv64 -plugin /rivos/qemu/plugins/libpctrace.so,out=$PWD/trace ./coremark.riscv 0 0 0 100
-
-*Note the use of a much smaller iteration count*.  Collecting a full trace is quite slow, and the resulting files are massive.
