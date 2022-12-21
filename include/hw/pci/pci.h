@@ -116,6 +116,11 @@ extern bool pci_available;
 #define PCI_DEVICE_ID_REDHAT_ACPI_ERST   0x0012
 #define PCI_DEVICE_ID_REDHAT_QXL         0x0100
 
+/* Rivos */
+#define PCI_VENDOR_ID_RIVOS              0x1efd
+#define PCI_DEVICE_ID_RIVOS_DCE          0x0010
+#define PCI_DEVICE_ID_RIVOS_DCE_VF       0x0011
+
 #define FMT_PCIBUS                      PRIx64
 
 typedef uint64_t pcibus_t;

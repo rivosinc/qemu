@@ -555,6 +555,13 @@ if have_system or have_tools
 endif
 zlib = dependency('zlib', required: true, kwargs: static_kwargs)
 
+dce_crypto = not_found
+if not get_option('dce_crypto').auto() or have_block
+  dce_crypto = cc.find_library('dce_crypto',
+                           required: get_option('dce_crypto'),
+                           kwargs: static_kwargs)
+endif
+
 libaio = not_found
 if not get_option('linux_aio').auto() or have_block
   libaio = cc.find_library('aio', has_headers: ['libaio.h'],
@@ -1856,6 +1863,7 @@ config_host_data.set('CONFIG_LIBDAXCTL', libdaxctl.found())
 config_host_data.set('CONFIG_LIBISCSI', libiscsi.found())
 config_host_data.set('CONFIG_LIBNFS', libnfs.found())
 config_host_data.set('CONFIG_LIBSSH', libssh.found())
+config_host_data.set('CONFIG_DCE_CRYPTO', dce_crypto.found())
 config_host_data.set('CONFIG_LINUX_AIO', libaio.found())
 config_host_data.set('CONFIG_LINUX_IO_URING', linux_io_uring.found())
 config_host_data.set('CONFIG_LIBPMEM', libpmem.found())
@@ -3954,6 +3962,7 @@ summary_info += {'vde support':       vde}
 summary_info += {'netmap support':    have_netmap}
 summary_info += {'l2tpv3 support':    have_l2tpv3}
 summary_info += {'Linux AIO support': libaio}
+summary_info += {'dce_cryto support': dce_crypto}
 summary_info += {'Linux io_uring support': linux_io_uring}
 summary_info += {'ATTR/XATTR support': libattr}
 summary_info += {'RDMA support':      rdma}
