@@ -116,7 +116,6 @@ meson_options_help() {
   printf "%s\n" '  linux-io-uring  Linux io_uring support'
   printf "%s\n" '  live-block-migration'
   printf "%s\n" '                  block migration in the main migration stream'
-  printf "%s\n" '  lz4             lz4'
   printf "%s\n" '  lzfse           lzfse support for DMG images'
   printf "%s\n" '  lzo             lzo compression support'
   printf "%s\n" '  malloc-trim     enable libc malloc_trim() for memory optimization'
@@ -128,7 +127,6 @@ meson_options_help() {
   printf "%s\n" '  numa            libnuma support'
   printf "%s\n" '  nvmm            NVMM acceleration support'
   printf "%s\n" '  opengl          OpenGL support'
-  printf "%s\n" '  openssl         openssl'
   printf "%s\n" '  oss             OSS sound support'
   printf "%s\n" '  pa              PulseAudio sound support'
   printf "%s\n" '  parallels       parallels image format support'
@@ -331,8 +329,6 @@ _meson_option_parse() {
     --disable-live-block-migration) printf "%s" -Dlive_block_migration=disabled ;;
     --localedir=*) quote_sh "-Dlocaledir=$2" ;;
     --localstatedir=*) quote_sh "-Dlocalstatedir=$2" ;;
-    --enable-lz4) printf "%s" -Dlz4=enabled ;;
-    --disable-lz4) printf "%s" -Dlz4=disabled ;;
     --enable-lzfse) printf "%s" -Dlzfse=enabled ;;
     --disable-lzfse) printf "%s" -Dlzfse=disabled ;;
     --enable-lzo) printf "%s" -Dlzo=enabled ;;
@@ -359,8 +355,6 @@ _meson_option_parse() {
     --disable-nvmm) printf "%s" -Dnvmm=disabled ;;
     --enable-opengl) printf "%s" -Dopengl=enabled ;;
     --disable-opengl) printf "%s" -Dopengl=disabled ;;
-    --enable-openssl) printf "%s" -Dopenssl=enabled ;;
-    --disable-openssl) printf "%s" -Dopenssl=disabled ;;
     --enable-oss) printf "%s" -Doss=enabled ;;
     --disable-oss) printf "%s" -Doss=disabled ;;
     --enable-pa) printf "%s" -Dpa=enabled ;;

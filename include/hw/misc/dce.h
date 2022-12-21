@@ -130,19 +130,6 @@ static bool op0_get_iv_addr_list(uint16_t op0){
 }
 #endif
 
-/* comp_format field enum */
-typedef enum {
-    RLE = 0,
-    Snappy,
-    LZ4,
-    GZIP,
-    ZSTD
-} CompFormat;
-static CompFormat op0_get_comp_format(uint16_t op0){
-    return extract16(op0, 1, 3);
-}
-
-
 enum {
     TO_LOCAL,
     FROM_LOCAL

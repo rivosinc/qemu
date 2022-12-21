@@ -15,13 +15,6 @@
 // #include "hw/riscv/riscv_hart.h" FIXME
 #define DCE_PAGE_SIZE  (1 << 12)
 
-#ifdef CONFIG_DCE_COMPRESSION
-#include "lz4.h"
-#include "snappy-c.h"
-#include "zlib.h"
-#include "zstd.h"
-#endif // CONFIG_DCE_COMPRESSION
-
 #ifdef CONFIG_DCE_CRYPTO
 #include "dce-crypto.h"
 #endif // CONFIG_DCE_CRYPTO
@@ -473,64 +466,6 @@ static int dce_crypto(DCEState *state,
     qemu_log_mask(LOG_UNIMP, "Crypto not implemented in DCE");
     return -1;
 #endif
-}
-
-static int dce_compress_decompress(struct DCEDescriptor *descriptor,
-                                   const char * src, char * dst,
-                                   size_t src_size, size_t * dst_size, int dir)
-{
-#ifdef CONFIG_DCE_COMPRESSION
-    int err = 0;
-    /* bit 1-3 in opernad 0 specify the compression format */
-    //int comp_format = (descriptor->operand0 >> 1) & 0x7;
-    int comp_format = op0_get_comp_format(descriptor->operand0);
-    switch(comp_format) {
-        case RLE:
-            break;
-        case Snappy:
-            if (dir == COMPRESS) {
-                printf("Compressing using Snappy!");
-                err = snappy_compress(src, src_size, dst, dst_size);
-            } else {
-                printf("Decompressing using Snappy!\n");
-                err = snappy_uncompress(src, src_size, dst, dst_size);
-            }
-            break;
-        case LZ4:
-            if (dir == COMPRESS) {
-                printf("Compressing using LZ4!\n");
-                *dst_size = LZ4_compress_default(src, dst, src_size, *dst_size);
-            } else {
-                printf("Decompressing using LZ4!\n");
-                *dst_size = LZ4_decompress_safe(src, dst, src_size, *dst_size);
-            }
-            break;
-        case GZIP:
-            if (dir == COMPRESS) {
-                printf("Compressing using GZIP!\n");
-                err = compress((Bytef *)dst, dst_size, (Bytef *)src, src_size);
-            } else {
-                printf("Decompressing using GZIP!\n");
-                err = uncompress((Bytef *)dst, dst_size,(Bytef *)src, src_size);
-            }
-            break;
-        case ZSTD:
-            if (dir == COMPRESS) {
-                printf("Compressing using ZSTD!\n");
-                *dst_size = ZSTD_compress(dst, *dst_size, src, src_size, 1);
-            } else {
-                printf("Decompressing using ZSTD!\n");
-                *dst_size = ZSTD_decompress(dst, *dst_size, src, src_size);
-            }
-            break;
-        default:
-            return -1;
-    }
-    if(err) printf("%s: ERROR: %d\n", __func__, err);
-    return err;
-#else  // CONFIG_DCE_COMPRESSION
-    return -1;
-#endif // CONFIG_DCE_COMPRESSION
 }
 
 /* CRC specific, move to a seperate file ? */
@@ -1059,7 +994,6 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
     const bool is_enc = descriptor->opcode == DCE_OPCODE_ENCRYPT;
     const bool is_dec = descriptor->opcode == DCE_OPCODE_DECRYPT;
     const bool is_crypto = is_enc || is_dec;
-    const SecMode mode =  op0_get_sec_mode(descriptor->operand0);
 
     if (is_crypto){
         dest_size = src_size;
@@ -1090,18 +1024,6 @@ static void dce_data_process(DCEState *state, struct DCEDescriptor *descriptor,
     /* perform compression / decompression */
     switch(descriptor->opcode)
     {
-        case DCE_OPCODE_COMPRESS:
-            err |= dce_compress_decompress(descriptor, src_local, dest_local,
-                                           src_size, &post_process_size,
-                                           COMPRESS);
-            printf("Compressed - %ld bytes\n", post_process_size);
-            break;
-        case DCE_OPCODE_DECOMPRESS:
-            err |= dce_compress_decompress(descriptor, src_local, dest_local,
-                                           src_size, &post_process_size,
-                                           DECOMPRESS);
-            printf("Decompressed - %ld bytes\n", post_process_size);
-            break;
         case DCE_OPCODE_ENCRYPT:
             err |= dce_crypto(state, descriptor, (uint8_t *)src_local,
                        (uint8_t *)dest_local, job_size, ENCRYPT, attrs);
@@ -1196,12 +1118,8 @@ static void finish_descriptor(DCEState *state, int WQ_id,
             dce_memset(state, &descriptor, attrs_to_use); break;
         case DCE_OPCODE_MEMCMP:
             dce_memcmp(state, &descriptor, attrs_to_use); break;
-        // case DCE_OPCODE_COMPRESS:
-        // case DCE_OPCODE_DECOMPRESS:
         case DCE_OPCODE_ENCRYPT:
         case DCE_OPCODE_DECRYPT:
-        // case DCE_OPCODE_DECRYPT_DECOMPRESS:
-        // case DCE_OPCODE_COMPRESS_ENCRYPT:
             dce_data_process(state, &descriptor, attrs_to_use); break;
         case DCE_OPCODE_LOAD_KEY:
             dce_load_key(state, &descriptor, attrs_to_use); break;
