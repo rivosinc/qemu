@@ -85,24 +85,20 @@ typedef struct DCEDescriptor {
 #define DCE_OPCODE_MEMCPY             1
 #define DCE_OPCODE_MEMSET             2
 #define DCE_OPCODE_MEMCMP             3
-#define DCE_OPCODE_COMPRESS           4
-#define DCE_OPCODE_DECOMPRESS         5
-#define DCE_OPCODE_LOAD_KEY           6
-#define DCE_OPCODE_CLEAR_KEY          7
-#define DCE_OPCODE_ENCRYPT            8
-#define DCE_OPCODE_DECRYPT            9
-#define DCE_OPCODE_DECRYPT_DECOMPRESS 10
-#define DCE_OPCODE_COMPRESS_ENCRYPT   11
-/* CRC Opcodes */
-#define DCE_OPCODE_CRC_GEN            12
-#define DCE_OPCODE_MEMCPY_CRC_GEN     13
+#define DCE_OPCODE_LOAD_KEY           4
+#define DCE_OPCODE_CLEAR_KEY          5
+#define DCE_OPCODE_ENCRYPT            6
+#define DCE_OPCODE_DECRYPT            7
 /* PI Opcodes */
-#define DCE_OPCODE_DIF_CHK            14
-#define DCE_OPCODE_DIF_GEN            15
-#define DCE_OPCODE_DIF_UPD            16
-#define DCE_OPCODE_DIF_STRP           17
-#define DCE_OPCODE_DIX_CHK            18
-#define DCE_OPCODE_DIX_GEN            19
+#define DCE_OPCODE_DIF_CHK            8
+#define DCE_OPCODE_DIF_GEN            9
+#define DCE_OPCODE_DIF_UPD            10
+#define DCE_OPCODE_DIF_STRP           11
+#define DCE_OPCODE_DIX_CHK            12
+#define DCE_OPCODE_DIX_GEN            13
+/* CRC Opcodes */
+#define DCE_OPCODE_CRC_GEN            14
+#define DCE_OPCODE_MEMCPY_CRC_GEN     15
 
 #ifdef CONFIG_DCE_CRYPTO
 /* OPERAND 0 for Security/Efficiency */
