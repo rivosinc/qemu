@@ -1896,6 +1896,18 @@ static MemTxResult riscv_iommu_mmio_read(void *opaque, hwaddr addr,
     if ((addr & ~7) == RIO_REG_IOHPMCYCLES) {
         val = riscv_iommu_hpmcycle_read(s);
         ptr = (uint8_t *)&val + (addr & 7);
+    } else if ((addr & ~3) == RIO_REG_IOCNTOVF) {
+        /* Software can read RIO_REG_IOCNTOVF before timer callback completes.
+         * In which case CY_OF bit in RIO_IOHPMCYCLES_OF would be 0. Here we
+         * take the CY_OF bit state from RIO_REG_IOHPMCYCLES register as it's
+         * not dependent over the timer callback and is computed from cycle
+         * overflow.
+         */
+        val = ldq_le_p(&s->regs_rw[addr]);
+        val |= (riscv_iommu_hpmcycle_read(s) & RIO_IOHPMCYCLES_OF)
+                   ? RIO_IOCNTOVF_CY
+                   : 0;
+        ptr = (uint8_t *)&val + (addr & 3);
     } else {
         ptr = &s->regs_rw[addr];
     }
