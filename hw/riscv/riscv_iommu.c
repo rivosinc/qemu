@@ -1798,7 +1798,6 @@ static MemTxResult riscv_iommu_mmio_write(void *opaque, hwaddr addr,
         break;
 
     case RIO_REG_TR_REQ_CTRL:
-    case RIO_REG_TR_REQ_CTRL + 4:
         exec = BIT(RIO_EXEC_TR_REQUEST);
         regb = RIO_REG_TR_REQ_CTRL;
         busy = RIO_TRREQ_BUSY;
