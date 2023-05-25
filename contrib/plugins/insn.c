@@ -148,6 +148,10 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
 {
     g_autoptr(GString) out = g_string_new(NULL);
     int i;
+    FILE *fp = NULL;
+
+    fp = fopen("insn.out", "w");
+    assert(fp);
 
     if (do_size) {
         for (i = 0; i <= sizes->len; i++) {
@@ -173,6 +177,8 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
                                total_insns);
     }
     qemu_plugin_outs(out->str);
+    fprintf(fp, "%s", out->str);
+    fclose(fp);
 }
 
 
