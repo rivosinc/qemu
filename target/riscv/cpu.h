@@ -281,6 +281,7 @@ struct CPUArchState {
     target_ulong scounteren;
     target_ulong mcounteren;
 
+    target_ulong scountinhibit;
     target_ulong mcountinhibit;
 
     /* PMU cycle & instret privilege mode filtering */
