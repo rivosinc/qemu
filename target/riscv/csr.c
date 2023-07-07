@@ -1721,6 +1721,10 @@ static int sxcsrind_xlate_vs_csrno(CPURISCVState *env, int csrno)
         return CSR_VSISELECT;
     case CSR_SIREG:
         return CSR_VSIREG;
+    case CSR_SIREG2:
+        return CSR_VSIREG2;
+    case CSR_SIREG3:
+        return CSR_VSIREG3;
     default:
         return csrno;
     };
@@ -1826,6 +1830,106 @@ static int rmw_iprio(target_ulong xlen,
     return 0;
 }
 
+static int rmw_xctrsource(CPURISCVState *env, int isel, target_ulong *val,
+                          target_ulong new_val, target_ulong wr_mask)
+{
+    /*
+     * CTR arrays are treated as circular buffers and TOS always points to next
+     * empty slot, keeping TOS - 1 always pointing to latest entry. Given entry
+     * 0 is always the latest one, traversal is a bit different here. See the
+     * below example.
+     *
+     * Depth = 16.
+     *
+     * idx    [0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [A] [B] [C] [D] [E] [F]
+     * TOS                                 H
+     * entry   6   5   4   3   2   1   0   F   E   D   C   B   A   9   8   7
+     */
+    const uint64_t entry = isel - CTR_ENTRIES_FIRST;
+    uint64_t idx, depth;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    depth = 16 * (get_field(env->mctrcontrol, MCTRCONTROL_DEPTH_MASK) + 1);
+    idx = get_field(env->mctrstatus, MCTRSTATUS_TOS_MASK);
+    idx = (idx - entry - 1) & (depth - 1);
+
+    if (val) {
+        *val = env->ctr_src[idx];
+    }
+
+    env->ctr_src[idx] = (env->ctr_src[idx] & ~wr_mask) | (new_val & wr_mask);
+
+    return 0;
+}
+
+static int rmw_xctrtarget(CPURISCVState *env, int isel, target_ulong *val,
+                          target_ulong new_val, target_ulong wr_mask)
+{
+    /*
+     * CTR arrays are treated as circular buffers and TOS always points to next
+     * empty slot, keeping TOS - 1 always pointing to latest entry. Given entry
+     * 0 is always the latest one, traversal is a bit different here. See the
+     * below example.
+     *
+     * Depth = 16.
+     *
+     * idx    [0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [A] [B] [C] [D] [E] [F]
+     * head                                H
+     * entry   6   5   4   3   2   1   0   F   E   D   C   B   A   9   8   7
+     */
+    const uint64_t entry = isel - CTR_ENTRIES_FIRST;
+    uint64_t idx, depth;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    depth = 16 * (get_field(env->mctrcontrol, MCTRCONTROL_DEPTH_MASK) + 1);
+    idx = get_field(env->mctrstatus, MCTRSTATUS_TOS_MASK);
+    idx = (idx - entry - 1) & (depth - 1);
+
+    if (val) {
+        *val = env->ctr_dst[idx];
+    }
+
+    env->ctr_dst[idx] = (env->ctr_dst[idx] & ~wr_mask) | (new_val & wr_mask);
+
+    return 0;
+}
+
+static int rmw_xctrdata(CPURISCVState *env, int isel, target_ulong *val,
+                        target_ulong new_val, target_ulong wr_mask)
+{
+    /*
+     * CTR arrays are treated as circular buffers and TOS always points to next
+     * empty slot, keeping TOS - 1 always pointing to latest entry. Given entry
+     * 0 is always the latest one, traversal is a bit different here. See the
+     * below example.
+     *
+     * Depth = 16.
+     *
+     * idx    [0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [A] [B] [C] [D] [E] [F]
+     * head                                H
+     * entry   6   5   4   3   2   1   0   F   E   D   C   B   A   9   8   7
+     */
+    const uint64_t entry = isel - CTR_ENTRIES_FIRST;
+    const uint64_t mask = wr_mask & CTRDATA_MASK;
+    uint64_t idx, depth;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    depth = 16 * (get_field(env->mctrcontrol, MCTRCONTROL_DEPTH_MASK) + 1);
+    idx = get_field(env->mctrstatus, MCTRSTATUS_TOS_MASK);
+    idx = (idx - entry - 1) & (depth - 1);
+
+    if (val) {
+        *val = env->ctr_data[idx];
+    }
+
+    env->ctr_data[idx] = (env->ctr_data[idx] & ~mask) | (new_val & mask);
+
+    return 0;
+}
+
 static int rmw_xireg_aia(CPURISCVState *env, int csrno,
                          target_ulong isel, target_ulong *val,
                          target_ulong new_val, target_ulong wr_mask)
@@ -1893,7 +1997,34 @@ static int rmw_xireg_sxcsrind(CPURISCVState *env, int csrno,
                               target_ulong isel, target_ulong *val,
                               target_ulong new_val, target_ulong wr_mask)
 {
-    return -EINVAL;
+    int ret = -EINVAL;
+    bool ext_sxctr = false;
+
+    if (CTR_ENTRIES_FIRST <= isel && isel <= CTR_ENTRIES_LAST) {
+        if (CSR_MIREG <= csrno && csrno <= CSR_MIREG3) {
+            ext_sxctr = riscv_cpu_cfg(env)->ext_smctr;
+        } else if (CSR_SIREG <= csrno && csrno <= CSR_SIREG3) {
+            ext_sxctr = riscv_cpu_cfg(env)->ext_ssctr;
+        } else if (CSR_VSIREG <= csrno && csrno <= CSR_VSIREG3) {
+            ext_sxctr = riscv_cpu_cfg(env)->ext_ssctr;
+        }
+
+        if (!ext_sxctr) {
+            return -EINVAL;
+        }
+
+        if (csrno == CSR_MIREG || csrno == CSR_SIREG || csrno == CSR_VSIREG) {
+            ret = rmw_xctrsource(env, isel, val, new_val, wr_mask);
+        } else if (csrno == CSR_MIREG2 || csrno == CSR_SIREG2 ||
+                   csrno == CSR_VSIREG2) {
+            ret = rmw_xctrtarget(env, isel, val, new_val, wr_mask);
+        } else if (csrno == CSR_MIREG3 || csrno == CSR_SIREG3 ||
+                   csrno == CSR_VSIREG3) {
+            ret = rmw_xctrdata(env, isel, val, new_val, wr_mask);
+        }
+    }
+
+    return ret;
 }
 
 static int rmw_xiregi(CPURISCVState *env, int csrno, target_ulong *val,
