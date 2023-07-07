@@ -596,6 +596,36 @@ static RISCVException pointer_masking(CPURISCVState *env, int csrno)
     return RISCV_EXCP_ILLEGAL_INST;
 }
 
+static RISCVException ctr_mmode(CPURISCVState *env, int csrno)
+{
+    /* Check if smctr-ext is present */
+    if (riscv_cpu_cfg(env)->ext_smctr) {
+        return RISCV_EXCP_NONE;
+    }
+
+    return RISCV_EXCP_ILLEGAL_INST;
+}
+
+static RISCVException ctr_smode(CPURISCVState *env, int csrno)
+{
+    if ((env->priv == PRV_M && riscv_cpu_cfg(env)->ext_smctr) ||
+        (env->priv == PRV_S && riscv_cpu_cfg(env)->ext_ssctr)) {
+	return RISCV_EXCP_NONE;
+    }
+
+    return RISCV_EXCP_ILLEGAL_INST;
+}
+
+static RISCVException ctr_vsmode(CPURISCVState *env, int csrno)
+{
+    if (env->priv == PRV_S && env->virt_enabled &&
+	riscv_cpu_cfg(env)->ext_ssctr) {
+       return hmode(env, csrno);
+    }
+
+    return ctr_smode(env, csrno);
+}
+
 static int aia_hmode(CPURISCVState *env, int csrno)
 {
     int ret;
@@ -3385,6 +3415,92 @@ static RISCVException write_satp(CPURISCVState *env, int csrno,
     return RISCV_EXCP_NONE;
 }
 
+static RISCVException rmw_sctrdepth(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & SCTRDEPTH_MASK;
+
+    if (ret_val) {
+        *ret_val = env->sctrdepth & SCTRDEPTH_MASK;
+    }
+
+    /* Correct depth. */
+    if (wr_mask & SCTRDEPTH_MASK) {
+        uint64_t depth = get_field(new_val & wr_mask, SCTRDEPTH_MASK);
+
+        if (depth > SCTRDEPTH_MAX) {
+            depth = SCTRDEPTH_MAX;
+        }
+
+        new_val = set_field(new_val, SCTRDEPTH_MASK, depth);
+    }
+
+    env->sctrdepth = (env->sctrdepth & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException rmw_mctrctl(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & MCTRCTL_MASK;
+
+    if (ret_val) {
+        *ret_val = env->mctrctl & MCTRCTL_MASK;
+    }
+
+    env->mctrctl = (env->mctrctl & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException rmw_sctrctl(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & SCTRCTL_MASK;
+    RISCVException ret;
+
+    ret = rmw_mctrctl(env, csrno, ret_val, new_val, mask);
+    if (ret_val) {
+        *ret_val &= SCTRCTL_MASK;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_sctrstatus(CPURISCVState *env, int csrno,
+                                     target_ulong *ret_val,
+                                     target_ulong new_val, target_ulong wr_mask)
+{
+    uint32_t mask = wr_mask & SCTRSTATUS_MASK;
+
+    if (ret_val) {
+        *ret_val = env->sctrstatus & SCTRSTATUS_MASK;
+    }
+
+    env->sctrstatus = (env->sctrstatus & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException rmw_vsctrctl(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & VSCTRCTL_MASK;
+
+    if (ret_val) {
+        *ret_val = env->vsctrctl & VSCTRCTL_MASK;
+    }
+
+    env->vsctrctl = (env->vsctrctl & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
 static int read_vstopi(CPURISCVState *env, int csrno, target_ulong *val)
 {
     int irq, ret;
@@ -5102,6 +5218,16 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
     [CSR_SPMBASE] =    { "spmbase", pointer_masking, read_spmbase,
                          write_spmbase                                      },
 
+    [CSR_MCTRCTL]       = { "mctrctl",       ctr_mmode, NULL, NULL,
+                                rmw_mctrctl },
+    [CSR_SCTRCTL]       = { "sctrctl",       ctr_smode, NULL, NULL,
+                                rmw_sctrctl },
+    [CSR_SCTRCTL]       = { "sctrdepth",       ctr_smode, NULL, NULL,
+                                rmw_sctrdepth },
+    [CSR_SCTRSTATUS]       = { "sctrstatus",       ctr_smode, NULL, NULL,
+                                rmw_sctrstatus },
+    [CSR_VSCTRCTL]      = { "vsctrctl",      ctr_vsmode, NULL, NULL,
+                                rmw_vsctrctl },
     /* Performance Counters */
     [CSR_HPMCOUNTER3]    = { "hpmcounter3",    ctr,    read_hpmcounter },
     [CSR_HPMCOUNTER4]    = { "hpmcounter4",    ctr,    read_hpmcounter },
