@@ -265,6 +265,8 @@ target_ulong helper_sret(CPURISCVState *env)
 {
     uint64_t mstatus;
     target_ulong prev_priv, prev_virt;
+    target_ulong curr_priv;
+    bool curr_virt;
 
     if (!(env->priv >= PRV_S)) {
         riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
@@ -294,6 +296,9 @@ target_ulong helper_sret(CPURISCVState *env)
     }
     env->mstatus = mstatus;
 
+    curr_virt = env->virt_enabled;
+    curr_priv = env->priv;
+
     if (riscv_has_ext(env, RVH) && !env->virt_enabled) {
         /* We support Hypervisor extensions and virtulisation is disabled */
         target_ulong hstatus = env->hstatus;
@@ -313,11 +318,17 @@ target_ulong helper_sret(CPURISCVState *env)
 
     riscv_cpu_set_mode(env, prev_priv);
 
+    riscv_ctr_add_entry(env, env->pc, retpc, CTRDATA_TYPE_EXCEP_INT_RET,
+                        curr_priv, curr_virt);
+
     return retpc;
 }
 
 target_ulong helper_mret(CPURISCVState *env)
 {
+    target_ulong curr_priv;
+    bool curr_virt;
+
     if (!(env->priv >= PRV_M)) {
         riscv_raise_exception(env, RISCV_EXCP_ILLEGAL_INST, GETPC());
     }
@@ -346,6 +357,10 @@ target_ulong helper_mret(CPURISCVState *env)
         mstatus = set_field(mstatus, MSTATUS_MPRV, 0);
     }
     env->mstatus = mstatus;
+
+    curr_virt = env->virt_enabled;
+    curr_priv = env->priv;
+
     riscv_cpu_set_mode(env, prev_priv);
 
     if (riscv_has_ext(env, RVH)) {
@@ -356,7 +371,110 @@ target_ulong helper_mret(CPURISCVState *env)
         riscv_cpu_set_virt_enabled(env, prev_virt);
     }
 
+    riscv_ctr_add_entry(env, env->pc, retpc, CTRDATA_TYPE_EXCEP_INT_RET,
+                        curr_priv, curr_virt);
+
     return retpc;
+}
+
+/*
+ * Indirect calls
+ * – jalr x1, rs where rs != x5;
+ * – jalr x5, rs where rs != x1;
+ * – c.jalr rs1 where rs1 != x5;
+ *
+ * Indirect jumps
+ * – jalr x0, rs where rs != x1 and rs != x5;
+ * – c.jr rs1 where rs1 != x1 and rs1 != x5.
+ *
+ * Returns
+ * – jalr rd, rs where (rs == x1 or rs == x5) and rd != x1 and rd != x5;
+ * – c.jr rs1 where rs1 == x1 or rs1 == x5.
+ *
+ * Co-routine swap
+ * – jalr x1, x5;
+ * – jalr x5, x1;
+ * – c.jalr x5.
+ *
+ * Other indirect jumps
+ * – jalr rd, rs where rs != x1, rs != x5, rd != x0, rd != x1 and rd != x5.
+ */
+void helper_ctr_jalr(CPURISCVState *env, target_ulong src, target_ulong dest,
+                     target_ulong rd, target_ulong rs1)
+{
+    target_ulong curr_priv;
+    bool curr_virt;
+
+    curr_virt = env->virt_enabled;
+    curr_priv = env->priv;
+
+    if ((rd == 1 && rs1 != 5) || (rd == 5 && rs1 != 1)) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_INDIRECT_CALL,
+                            curr_priv, curr_virt);
+    } else if (rd == 0 && rs1 != 1 && rs1 != 5) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_INDIRECT_JUMP,
+                            curr_priv, curr_virt);
+    } else if ((rs1 == 1 || rs1 == 5) && (rd != 1 && rd != 5)) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_RETURN,
+                            curr_priv, curr_virt);
+    } else if ((rs1 == 1 && rd == 5) || (rs1 == 5 && rd == 1)) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_CO_ROUTINE_SWAP,
+                            curr_priv, curr_virt);
+    } else {
+        riscv_ctr_add_entry(env, src, dest,
+                            CTRDATA_TYPE_OTHER_INDIRECT_JUMP, curr_priv,
+                            curr_virt);
+    }
+}
+
+/*
+ * Direct calls
+ * – jal x1;
+ * – jal x5;
+ * – c.jal.
+ *
+ * Direct jumps
+ * – jal x0;
+ * – c.j;
+ *
+ * Other direct jumps
+ * – jal rd where rd != x1 and rd != x5 and rd != x0;
+ */
+void helper_ctr_jal(CPURISCVState *env, target_ulong src, target_ulong dest,
+                    target_ulong rd)
+{
+    target_ulong priv;
+    bool virt;
+
+    virt = env->virt_enabled;
+    priv = env->priv;
+
+    /*
+     * If rd is x1 or x5 link registers, treat this as direct call otherwise
+     * its a direct jump.
+     */
+    if (rd == 1 || rd == 5) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_DIRECT_CALL, priv,
+                            virt);
+    } else if (rd == 0) {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_DIRECT_JUMP, priv,
+                            virt);
+    } else {
+        riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_OTHER_DIRECT_JUMP,
+                            priv, virt);
+    }
+}
+
+void helper_ctr_branch(CPURISCVState *env, target_ulong src, target_ulong dest)
+{
+    target_ulong curr_priv;
+    bool curr_virt;
+
+    curr_virt = env->virt_enabled;
+    curr_priv = env->priv;
+
+    riscv_ctr_add_entry(env, src, dest, CTRDATA_TYPE_TAKEN_BRANCH,
+                        curr_priv, curr_virt);
 }
 
 void helper_wfi(CPURISCVState *env)

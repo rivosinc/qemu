@@ -115,6 +115,9 @@ DEF_HELPER_1(mret, tl, env)
 DEF_HELPER_1(wfi, void, env)
 DEF_HELPER_1(tlb_flush, void, env)
 DEF_HELPER_1(tlb_flush_all, void, env)
+DEF_HELPER_3(ctr_branch, void, env, tl, tl)
+DEF_HELPER_4(ctr_jal, void, env, tl, tl, tl)
+DEF_HELPER_5(ctr_jalr, void, env, tl, tl, tl, tl)
 /* Native Debug */
 DEF_HELPER_1(itrigger_match, void, env)
 #endif

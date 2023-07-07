@@ -631,6 +631,10 @@ uint64_t riscv_cpu_update_mip(CPURISCVState *env, uint64_t mask,
 
     QEMU_IOTHREAD_LOCK_GUARD();
 
+    if (MIP_LCOFIP & value & mask) {
+        riscv_ctr_freeze(env, MCTRCONTROL_LCOFIFRZ);
+    }
+
     env->mip = (env->mip & ~mask) | (value & mask);
 
     if (env->mip | vsgein | vstip) {
@@ -660,6 +664,178 @@ void riscv_cpu_set_aia_ireg_rmw_fn(CPURISCVState *env, uint32_t priv,
     if (priv <= PRV_M) {
         env->aia_ireg_rmw_fn[priv] = rmw_fn;
         env->aia_ireg_rmw_fn_arg[priv] = rmw_fn_arg;
+    }
+}
+
+void riscv_ctr_freeze(CPURISCVState *env, uint64_t freeze_mask)
+{
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    assert((freeze_mask & (~(MCTRCONTROL_BPFRZ | MCTRCONTROL_LCOFIFRZ))) == 0);
+
+    if (env->mctrcontrol & freeze_mask) {
+        env->mctrstatus |= MCTRSTATUS_FROZEN;
+    }
+}
+
+static uint64_t riscv_ctr_priv_to_mask(target_ulong priv, bool virt)
+{
+    switch (priv) {
+    case PRV_M:
+        return MCTRCONTROL_M_ENABLE;
+    case PRV_S:
+        if (virt) {
+            return VSCTRCONTROL_VS_ENABLE;
+        }
+        return MCTRCONTROL_S_ENABLE;
+    case PRV_U:
+        if (virt) {
+            return VSCTRCONTROL_VU_ENABLE;
+        }
+        return MCTRCONTROL_U_ENABLE;
+    }
+
+    g_assert_not_reached();
+}
+
+/*
+ * Special cases for traps and trap returns:
+ *
+ * 1- Traps, and trap returns, between enabled modes are recorded as normal.
+ * 2- Traps from an inhibited mode to an enabled mode, and trap returns from an
+ * enabled mode back to an inhibited mode, are partially recorded.  In such
+ * cases, the PC from the inhibited mode (source PC for traps, and target PC
+ * for trap returns) is 0.
+ *
+ * 3- Trap returns from an inhibited mode to an enabled mode are not recorded.
+ * Traps from an enabled mode to an inhibited mode, known as external traps,
+ * receive special handling.
+ * By default external traps are not recorded, but a handshake mechanism exists
+ * to allow partial recording.  Software running in the target mode of the trap
+ * can opt-in to allowing CTR to record traps into that mode even when the mode
+ * is inhibited.  The MTE, STE, and VSTE bits allow M-mode, S-mode, and VS-mode,
+ * respectively, to opt-in.  Tools can request to record External Traps by
+ * setting the ETEN bit.  When an External Trap occurs, only if both ETEN=1 and
+ * xTE=1, such that x is the target privilege mode of the trap, will CTR record
+ * the trap.  In such cases, the target PC is 0, and the transfer type (if
+ * supported) is External Trap (6).
+ */
+/*
+ * CTR arrays are treated as circular buffers and new entry is stored at
+ * head + 1, keeping head always pointing to latest entry.
+ *
+ * Depth = 16.
+ *
+ * idx    [0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [A] [B] [C] [D] [E] [F]
+ * head                                H
+ * entry   7   6   5   4   3   2   1   0   F   E   D   C   B   A   9   8
+ */
+void riscv_ctr_add_entry(CPURISCVState *env, target_long src, target_long dst,
+                         uint64_t type, target_ulong prev_priv, bool prev_virt)
+{
+
+    bool virt = env->virt_enabled;
+    uint64_t prev_mask = riscv_ctr_priv_to_mask(prev_priv, prev_virt);
+    uint64_t new_mask = riscv_ctr_priv_to_mask(env->priv, virt);
+    target_ulong new_priv = env->priv;
+    uint64_t depth, head;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    if (env->mctrstatus & MCTRSTATUS_FROZEN) {
+        return;
+    }
+
+    /*
+     * With RAS Emul enabled, only allow Indirect, drirect calls, Function
+     * returns and Co-routine swap types.
+     */
+    if (env->mctrcontrol & MCTRCONTROL_RASEMU &&
+        type != CTRDATA_TYPE_INDIRECT_CALL &&
+        type != CTRDATA_TYPE_DIRECT_CALL &&
+        type != CTRDATA_TYPE_RETURN &&
+        type != CTRDATA_TYPE_CO_ROUTINE_SWAP) {
+        return;
+    }
+
+    if (type == CTRDATA_TYPE_EXCEPTION || type == CTRDATA_TYPE_INTERRUPT) {
+        /* Case 2 for traps. */
+        if (!(env->mctrcontrol & prev_mask) && env->mctrcontrol & new_mask) {
+            src = 0;
+        } else if (env->mctrcontrol & prev_mask &&
+                   !(env->mctrcontrol & new_mask)) {
+            /* Case 3 for traps. */
+            if (!(env->mctrcontrol & MCTRCONTROL_ETEN)) {
+                return;
+            }
+
+            /* Check if target priv-mode has allowed external trap recording. */
+            if ((new_priv == PRV_M && !(env->mctrcontrol & MCTRCONTROL_MTE)) ||
+                (new_priv == PRV_S && !(env->mctrcontrol & MCTRCONTROL_STE))) {
+                return;
+            }
+
+            if (new_priv == PRV_S && virt &&
+                !(env->vsctrcontrol & VSCTRCONTROL_VSTE)) {
+                return;
+            }
+
+            type = CTRDATA_TYPE_EXTERNAL_TRAP;
+            dst = 0;
+        } else {
+            return;
+        }
+    } else if (type == CTRDATA_TYPE_EXCEP_INT_RET) {
+        /* Case 2 for trap returns. */
+        if (env->mctrcontrol & prev_mask && !(env->mctrcontrol & new_mask)) {
+            dst = 0;
+        }
+
+        /*
+         * Case 3 for trap returns.  Trap returns from inhibited mode are not
+         * recorded.
+         */
+        if (!(env->mctrcontrol & prev_mask)) {
+            return;
+        }
+    } else if (!virt && !(env->mctrcontrol & new_mask)) {
+        return;
+    } else if (virt && !(env->vsctrcontrol & new_mask)) {
+        return;
+    }
+
+    /*
+     * Check if the type is inhibitted, except for CTRDATA_TYPE_EXTERNAL_TRAP
+     * which has more complex check and is already performed above.
+     */
+    if (type != CTRDATA_TYPE_EXTERNAL_TRAP &&
+        env->mctrcontrol & BIT_ULL(type + MCTRCONTROL_INH_START)) {
+        return;
+    }
+
+    head = get_field(env->mctrstatus, MCTRSTATUS_TOS_MASK);
+
+    depth = 16 * (get_field(env->mctrcontrol, MCTRCONTROL_DEPTH_MASK) + 1);
+    if (env->mctrcontrol & MCTRCONTROL_RASEMU && type == CTRDATA_TYPE_RETURN) {
+        head = (head - 1) & (depth - 1);
+
+        env->ctr_src[head] &= ~CTRSOURCE_VALID;
+        env->mctrstatus = set_field(env->mctrstatus, MCTRSTATUS_TOS_MASK, head);
+        if (head == (depth - 1)) {
+            env->mctrstatus &= MCTRSTATUS_WRAP;
+        }
+        return;
+    }
+
+    env->ctr_src[head] = src | CTRSOURCE_VALID;
+    env->ctr_dst[head] = dst & ~CTRTARGET_MISP;
+    env->ctr_data[head] = set_field(0, CTRDATA_TYPE_MASK, type);
+
+    head = (head + 1) & (depth - 1);
+
+    env->mctrstatus = set_field(env->mctrstatus, MCTRSTATUS_TOS_MASK, head);
+    if (head == 0) {
+        env->mctrstatus |= MCTRSTATUS_WRAP;
     }
 }
 
@@ -1601,6 +1777,9 @@ void riscv_cpu_do_interrupt(CPUState *cs)
     target_ulong tinst = 0;
     target_ulong htval = 0;
     target_ulong mtval2 = 0;
+    target_ulong prev_priv;
+    bool prev_virt = false;
+    target_ulong src;
 
     if  (cause == RISCV_EXCP_SEMIHOST) {
         do_common_semihosting(cs);
@@ -1658,6 +1837,7 @@ void riscv_cpu_do_interrupt(CPUState *cs)
                 tval = cs->watchpoint_hit->hitaddr;
                 cs->watchpoint_hit = NULL;
             }
+            riscv_ctr_freeze(env, MCTRCONTROL_BPFRZ);
             break;
         default:
             break;
@@ -1704,6 +1884,7 @@ void riscv_cpu_do_interrupt(CPUState *cs)
                     cause = cause - 1;
                 }
                 write_gva = false;
+                prev_virt = true;
             } else if (env->virt_enabled) {
                 /* Trap into HS mode, from virt */
                 riscv_cpu_swap_hypervisor_regs(env);
@@ -1714,6 +1895,8 @@ void riscv_cpu_do_interrupt(CPUState *cs)
                 htval = env->guest_phys_fault_addr;
 
                 riscv_cpu_set_virt_enabled(env, 0);
+
+                prev_virt = true;
             } else {
                 /* Trap into HS mode */
                 env->hstatus = set_field(env->hstatus, HSTATUS_SPV, false);
@@ -1721,6 +1904,8 @@ void riscv_cpu_do_interrupt(CPUState *cs)
             }
             env->hstatus = set_field(env->hstatus, HSTATUS_GVA, write_gva);
         }
+
+        prev_priv = env->priv;
 
         s = env->mstatus;
         s = set_field(s, MSTATUS_SPIE, get_field(s, MSTATUS_SIE));
@@ -1735,11 +1920,14 @@ void riscv_cpu_do_interrupt(CPUState *cs)
         env->pc = (env->stvec >> 2 << 2) +
                   ((async && (env->stvec & 3) == 1) ? cause * 4 : 0);
         riscv_cpu_set_mode(env, PRV_S);
+
+        src = env->sepc;
     } else {
         /* handle the trap in M-mode */
         if (riscv_has_ext(env, RVH)) {
             if (env->virt_enabled) {
                 riscv_cpu_swap_hypervisor_regs(env);
+                prev_virt = true;
             }
             env->mstatus = set_field(env->mstatus, MSTATUS_MPV,
                                      env->virt_enabled);
@@ -1752,6 +1940,8 @@ void riscv_cpu_do_interrupt(CPUState *cs)
             /* Trapping to M mode, virt is disabled */
             riscv_cpu_set_virt_enabled(env, 0);
         }
+
+        prev_priv = env->priv;
 
         s = env->mstatus;
         s = set_field(s, MSTATUS_MPIE, get_field(s, MSTATUS_MIE));
@@ -1766,7 +1956,13 @@ void riscv_cpu_do_interrupt(CPUState *cs)
         env->pc = (env->mtvec >> 2 << 2) +
                   ((async && (env->mtvec & 3) == 1) ? cause * 4 : 0);
         riscv_cpu_set_mode(env, PRV_M);
+
+        src = env->mepc;
     }
+
+    riscv_ctr_add_entry(env, src, env->pc,
+                        async ? CTRDATA_TYPE_EXCEPTION : CTRDATA_TYPE_INTERRUPT,
+                        prev_priv, prev_virt);
 
     /*
      * NOTE: it is not necessary to yield load reservations here. It is only
