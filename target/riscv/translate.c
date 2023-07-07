@@ -557,6 +557,11 @@ static void gen_set_fpr_d(DisasContext *ctx, int reg_num, TCGv_i64 t)
 static void gen_jal(DisasContext *ctx, int rd, target_ulong imm)
 {
     TCGv succ_pc = dest_gpr(ctx, rd);
+#ifndef CONFIG_USER_ONLY
+    TCGv dest = tcg_constant_tl(ctx->base.pc_next + imm);
+    TCGv src = tcg_constant_tl(ctx->base.pc_next);
+    TCGv tcg_rd = tcg_constant_tl((target_ulong)rd);
+#endif
 
     /* check misaligned: */
     if (!has_ext(ctx, RVC) && !ctx->cfg_ptr->ext_zca) {
@@ -567,6 +572,10 @@ static void gen_jal(DisasContext *ctx, int rd, target_ulong imm)
             return;
         }
     }
+
+#ifndef CONFIG_USER_ONLY
+    gen_helper_ctr_jal(cpu_env, src, dest, tcg_rd);
+#endif
 
     gen_pc_plus_diff(succ_pc, ctx, ctx->cur_insn_len);
     gen_set_gpr(ctx, rd, succ_pc);
