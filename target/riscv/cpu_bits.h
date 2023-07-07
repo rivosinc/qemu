@@ -250,6 +250,17 @@
 #define CSR_SIEH            0x114
 #define CSR_SIPH            0x154
 
+/* Machine-Level Control transfer records CSRs */
+#define CSR_MCTRCTL         0x34e
+
+/* Supervisor-Level Control transfer records CSRs */
+#define CSR_SCTRCTL         0x14e
+#define CSR_SCTRSTATUS      0x14f
+#define CSR_SCTRDEPTH       0x15f
+
+/* VS-Level Control transfer records CSRs */
+#define CSR_VSCTRCTL        0x24e
+
 /* Hpervisor CSRs */
 #define CSR_HSTATUS         0x600
 #define CSR_HEDELEG         0x602
@@ -854,6 +865,146 @@ typedef enum RISCVException {
 #define UMTE_U_PM_CURRENT   U_PM_CURRENT
 #define UMTE_U_PM_INSN      U_PM_INSN
 #define UMTE_MASK     (UMTE_U_PM_ENABLE | MMTE_U_PM_CURRENT | UMTE_U_PM_INSN)
+
+/* mctrctl CSR bits. */
+#define MCTRCTL_U_ENABLE        BIT(0)
+#define MCTRCTL_S_ENABLE        BIT(1)
+#define MCTRCTL_M_ENABLE        BIT(2)
+#define MCTRCTL_RASEMU          BIT(7)
+#define MCTRCTL_STE             BIT(8)
+#define MCTRCTL_MTE             BIT(9)
+#define MCTRCTL_BPFRZ           BIT(11)
+#define MCTRCTL_LCOFIFRZ        BIT(12)
+#define MCTRCTL_EXCINH          BIT(33)
+#define MCTRCTL_INTRINH         BIT(34)
+#define MCTRCTL_TRETINH         BIT(35)
+#define MCTRCTL_NTBREN          BIT(36)
+#define MCTRCTL_TKBRINH         BIT(37)
+#define MCTRCTL_INDCALL_INH     BIT(40)
+#define MCTRCTL_DIRCALL_INH     BIT(41)
+#define MCTRCTL_INDJUMP_INH     BIT(42)
+#define MCTRCTL_DIRJUMP_INH     BIT(43)
+#define MCTRCTL_CORSWAP_INH     BIT(44)
+#define MCTRCTL_RET_INH         BIT(45)
+#define MCTRCTL_INDOJUMP_INH    BIT(46)
+#define MCTRCTL_DIROJUMP_INH    BIT(47)
+
+#define MCTRCTL_INH_START       32U
+
+#define MCTRCTL_MASK (MCTRCTL_M_ENABLE | MCTRCTL_S_ENABLE |       \
+                      MCTRCTL_U_ENABLE | MCTRCTL_RASEMU |         \
+                      MCTRCTL_MTE | MCTRCTL_STE |                 \
+                      MCTRCTL_BPFRZ | MCTRCTL_LCOFIFRZ |          \
+                      MCTRCTL_EXCINH | MCTRCTL_INTRINH |          \
+                      MCTRCTL_TRETINH | MCTRCTL_NTBREN |          \
+                      MCTRCTL_TKBRINH | MCTRCTL_INDCALL_INH |     \
+                      MCTRCTL_DIRCALL_INH | MCTRCTL_INDJUMP_INH | \
+                      MCTRCTL_DIRJUMP_INH | MCTRCTL_CORSWAP_INH | \
+                      MCTRCTL_RET_INH | MCTRCTL_INDOJUMP_INH |    \
+                      MCTRCTL_DIROJUMP_INH)
+
+/* sctrctl CSR bits. */
+#define SCTRCTL_U_ENABLE          MCTRCTL_U_ENABLE
+#define SCTRCTL_S_ENABLE          MCTRCTL_S_ENABLE
+#define SCTRCTL_RASEMU            MCTRCTL_RASEMU
+#define SCTRCTL_STE               MCTRCTL_STE
+#define SCTRCTL_BPFRZ             MCTRCTL_BPFRZ
+#define SCTRCTL_LCOFIFRZ          MCTRCTL_LCOFIFRZ
+#define SCTRCTL_EXCINH            MCTRCTL_EXCINH
+#define SCTRCTL_INTRINH           MCTRCTL_INTRINH
+#define SCTRCTL_TRETINH           MCTRCTL_TRETINH
+#define SCTRCTL_NTBREN            MCTRCTL_NTBREN
+#define SCTRCTL_TKBRINH           MCTRCTL_TKBRINH
+#define SCTRCTL_INDCALL_INH       MCTRCTL_INDCALL_INH
+#define SCTRCTL_DIRCALL_INH       MCTRCTL_DIRCALL_INH
+#define SCTRCTL_INDJUMP_INH       MCTRCTL_INDJUMP_INH
+#define SCTRCTL_DIRJUMP_INH       MCTRCTL_DIRJUMP_INH
+#define SCTRCTL_CORSWAP_INH       MCTRCTL_CORSWAP_INH
+#define SCTRCTL_RET_INH           MCTRCTL_RET_INH
+#define SCTRCTL_INDOJUMP_INH      MCTRCTL_INDOJUMP_INH
+#define SCTRCTL_DIROJUMP_INH      MCTRCTL_DIROJUMP_INH
+
+#define SCTRCTL_MASK (SCTRCTL_S_ENABLE | SCTRCTL_U_ENABLE |       \
+                      SCTRCTL_RASEMU | SCTRCTL_STE |              \
+                      SCTRCTL_BPFRZ | SCTRCTL_LCOFIFRZ |          \
+                      SCTRCTL_EXCINH | SCTRCTL_INTRINH |          \
+                      SCTRCTL_TRETINH | SCTRCTL_NTBREN |          \
+                      SCTRCTL_TKBRINH | SCTRCTL_INDCALL_INH |     \
+                      SCTRCTL_DIRCALL_INH | SCTRCTL_INDJUMP_INH | \
+                      SCTRCTL_DIRJUMP_INH | SCTRCTL_CORSWAP_INH | \
+                      SCTRCTL_RET_INH | SCTRCTL_INDOJUMP_INH |    \
+                      SCTRCTL_DIROJUMP_INH)
+
+/* sctrstatus CSR bits. */
+#define SCTRSTATUS_WRPTR_MASK       0xFF
+#define SCTRSTATUS_FROZEN           BIT(31)
+#define SCTRSTATUS_MASK             (SCTRSTATUS_WRPTR_MASK | SCTRSTATUS_FROZEN)
+
+/* sctrdepth CSR bits. */
+#define SCTRDEPTH_MASK              0x7
+#define SCTRDEPTH_MIN       0U  /* 16 Entries. */
+#define SCTRDEPTH_MAX       4U  /* 256 Entries. */
+
+/* vsctrctl CSR bits. */
+#define VSCTRCTL_VU_ENABLE         MCTRCTL_U_ENABLE
+#define VSCTRCTL_VS_ENABLE         MCTRCTL_S_ENABLE
+#define VSCTRCTL_RASEMU            MCTRCTL_RASEMU
+#define VSCTRCTL_VSTE              MCTRCTL_STE
+#define VSCTRCTL_BPFRZ             MCTRCTL_BPFRZ
+#define VSCTRCTL_LCOFIFRZ          MCTRCTL_LCOFIFRZ
+#define VSCTRCTL_EXCINH            MCTRCTL_EXCINH
+#define VSCTRCTL_INTRINH           MCTRCTL_INTRINH
+#define VSCTRCTL_TRETINH           MCTRCTL_TRETINH
+#define VSCTRCTL_NTBREN            MCTRCTL_NTBREN
+#define VSCTRCTL_TKBRINH           MCTRCTL_TKBRINH
+#define VSCTRCTL_INDCALL_INH       MCTRCTL_INDCALL_INH
+#define VSCTRCTL_DIRCALL_INH       MCTRCTL_DIRCALL_INH
+#define VSCTRCTL_INDJUMP_INH       MCTRCTL_INDJUMP_INH
+#define VSCTRCTL_DIRJUMP_INH       MCTRCTL_DIRJUMP_INH
+#define VSCTRCTL_CORSWAP_INH       MCTRCTL_CORSWAP_INH
+#define VSCTRCTL_RET_INH           MCTRCTL_RET_INH
+#define VSCTRCTL_INDOJUMP_INH      MCTRCTL_INDOJUMP_INH
+#define VSCTRCTL_DIROJUMP_INH      MCTRCTL_DIROJUMP_INH
+
+#define VSCTRCTL_MASK (VSCTRCTL_VS_ENABLE | VSCTRCTL_VU_ENABLE |     \
+                       VSCTRCTL_RASEMU | VSCTRCTL_VSTE |             \
+                       VSCTRCTL_BPFRZ | VSCTRCTL_LCOFIFRZ |          \
+                       VSCTRCTL_EXCINH | VSCTRCTL_INTRINH |          \
+                       VSCTRCTL_TRETINH | VSCTRCTL_NTBREN |          \
+                       VSCTRCTL_TKBRINH | VSCTRCTL_INDCALL_INH |     \
+                       VSCTRCTL_DIRCALL_INH | VSCTRCTL_INDJUMP_INH | \
+                       VSCTRCTL_DIRJUMP_INH | VSCTRCTL_CORSWAP_INH | \
+                       VSCTRCTL_RET_INH | VSCTRCTL_INDOJUMP_INH |    \
+                       VSCTRCTL_DIROJUMP_INH)
+
+#define CTR_ENTRIES_FIRST                  0x200
+#define CTR_ENTRIES_LAST                   0x2ff
+
+#define CTRSOURCE_VALID                    BIT(0)
+#define CTRTARGET_MISP                     BIT(0)
+
+#define CTRDATA_TYPE_MASK                   0xF
+#define CTRDATA_CCV                         BIT(15)
+#define CTRDATA_CCM_MASK                    0xFFF0000
+#define CTRDATA_CCE_MASK                    0xF0000000
+
+#define CTRDATA_MASK            (CTRDATA_TYPE_MASK | CTRDATA_CCV |  \
+                                 CTRDATA_CCM_MASK | CTRDATA_CCE_MASK)
+
+#define CTRDATA_TYPE_NONE                   0
+#define CTRDATA_TYPE_EXCEPTION              1
+#define CTRDATA_TYPE_INTERRUPT              2
+#define CTRDATA_TYPE_EXCEP_INT_RET          3
+#define CTRDATA_TYPE_NONTAKEN_BRANCH        4
+#define CTRDATA_TYPE_TAKEN_BRANCH           5
+#define CTRDATA_TYPE_INDIRECT_CALL          8
+#define CTRDATA_TYPE_DIRECT_CALL            9
+#define CTRDATA_TYPE_INDIRECT_JUMP          10
+#define CTRDATA_TYPE_DIRECT_JUMP            11
+#define CTRDATA_TYPE_CO_ROUTINE_SWAP        12
+#define CTRDATA_TYPE_RETURN                 13
+#define CTRDATA_TYPE_OTHER_INDIRECT_JUMP    14
+#define CTRDATA_TYPE_OTHER_DIRECT_JUMP      15
 
 /* MISELECT, SISELECT, and VSISELECT bits (AIA) */
 #define ISELECT_IPRIO0                     0x30
