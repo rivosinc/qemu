@@ -206,6 +206,15 @@ struct CPUArchState {
     target_ulong mcause;
     target_ulong mtval;  /* since: priv-1.10.0 */
 
+    uint64_t mctrcontrol;
+    uint32_t mctrstatus;
+    /* vsctrcontrol only contains bits 9, 2 and 1 of CSR_VSCTRCONTROL. */
+    uint64_t vsctrcontrol;
+
+    uint64_t ctr_src[16 * (MCTRCONTROL_DEPTH_MAX + 1)];
+    uint64_t ctr_dst[16 * (MCTRCONTROL_DEPTH_MAX + 1)];
+    uint64_t ctr_data[16 * (MCTRCONTROL_DEPTH_MAX + 1)];
+
     /* Machine and Supervisor interrupt priorities */
     uint8_t miprio[64];
     uint8_t siprio[64];

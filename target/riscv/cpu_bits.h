@@ -247,6 +247,21 @@
 #define CSR_SIEH            0x114
 #define CSR_SIPH            0x154
 
+/* Machine-Level Control transfer records CTR CSRs */
+#define CSR_MCTRCONTROL     0x360
+#define CSR_MCTRCONTROLH    0x370
+#define CSR_MCTRSTATUS      0x361
+
+/* Supervisor-Level Control transfer records CTR CSRs */
+#define CSR_SCTRCONTROL     0x120
+#define CSR_SCTRCONTROLH    0x130
+#define CSR_SCTRSTATUS      0x121
+
+/* VS-Level Control transfer records CTR CSRs */
+#define CSR_VSCTRCONTROL    0x290
+#define CSR_VSCTRCONTROLH   0x2A0
+#define CSR_VSCTRSTATUS     0x291
+
 /* Hpervisor CSRs */
 #define CSR_HSTATUS         0x600
 #define CSR_HEDELEG         0x602
@@ -843,6 +858,174 @@ typedef enum RISCVException {
 #define UMTE_U_PM_CURRENT   U_PM_CURRENT
 #define UMTE_U_PM_INSN      U_PM_INSN
 #define UMTE_MASK     (UMTE_U_PM_ENABLE | MMTE_U_PM_CURRENT | UMTE_U_PM_INSN)
+
+/* mctrcontrol CSR bits. */
+#define MCTRCONTROL_M_ENABLE        BIT(0)
+#define MCTRCONTROL_S_ENABLE        BIT(1)
+#define MCTRCONTROL_U_ENABLE        BIT(2)
+#define MCTRCONTROL_CLR             BIT(7)
+#define MCTRCONTROL_MTE             BIT(8)
+#define MCTRCONTROL_STE             BIT(9)
+#define MCTRCONTROL_RASEMU          BIT(10)
+#define MCTRCONTROL_BPFRZ           BIT(11)
+#define MCTRCONTROL_LCOFIFRZ        BIT(12)
+#define MCTRCONTROL_DEPTH_MASK      0xF0000ULL
+#define MCTRCONTROL_EXCINH          BIT(33)
+#define MCTRCONTROL_INTRINH         BIT(34)
+#define MCTRCONTROL_TRETINH         BIT(35)
+#define MCTRCONTROL_BRINH           BIT(37)
+#define MCTRCONTROL_ETEN            BIT(38)
+#define MCTRCONTROL_INDCALL_INH     BIT(40)
+#define MCTRCONTROL_DIRCALL_INH     BIT(41)
+#define MCTRCONTROL_INDJUMP_INH     BIT(42)
+#define MCTRCONTROL_DIRJUMP_INH     BIT(43)
+#define MCTRCONTROL_CORSWAP_INH     BIT(44)
+#define MCTRCONTROL_RET_INH         BIT(45)
+#define MCTRCONTROL_INDOJUMP_INH    BIT(46)
+#define MCTRCONTROL_DIROJUMP_INH    BIT(47)
+
+#define MCTRCONTROL_INH_START       32
+#define MCTRCONTROL_DEPTH_MIN       0x0 /* 16 Entries. */
+#define MCTRCONTROL_DEPTH_MAX       0xf /* 256 Entries. */
+
+#define MCTRCONTROL_MASK (MCTRCONTROL_M_ENABLE | MCTRCONTROL_S_ENABLE |       \
+                          MCTRCONTROL_U_ENABLE | MCTRCONTROL_CLR |            \
+                          MCTRCONTROL_MTE | MCTRCONTROL_STE |                 \
+                          MCTRCONTROL_RASEMU | MCTRCONTROL_BPFRZ |            \
+                          MCTRCONTROL_LCOFIFRZ |                        \
+                          MCTRCONTROL_DEPTH_MASK | MCTRCONTROL_EXCINH |       \
+                          MCTRCONTROL_INTRINH | MCTRCONTROL_TRETINH |         \
+                          MCTRCONTROL_BRINH | MCTRCONTROL_ETEN |              \
+                          MCTRCONTROL_INDCALL_INH | MCTRCONTROL_DIRCALL_INH | \
+                          MCTRCONTROL_INDJUMP_INH | MCTRCONTROL_DIRJUMP_INH | \
+                          MCTRCONTROL_CORSWAP_INH | MCTRCONTROL_RET_INH |     \
+                          MCTRCONTROL_INDOJUMP_INH | MCTRCONTROL_DIROJUMP_INH)
+
+/* mctrstatus CSR bits. */
+#define MCTRSTATUS_TOS_MASK         0xFF
+#define MCTRSTATUS_WRAP             BIT(14)
+#define MCTRSTATUS_FROZEN           BIT(15)
+
+#define MCTRSTATUS_MASK             (MCTRSTATUS_TOS_MASK | MCTRSTATUS_WRAP |  \
+                                     MCTRSTATUS_FROZEN)
+
+/* sctrcontrol CSR bits. */
+#define SCTRCONTROL_S_ENABLE          MCTRCONTROL_S_ENABLE
+#define SCTRCONTROL_U_ENABLE          MCTRCONTROL_U_ENABLE
+#define SCTRCONTROL_CLR               MCTRCONTROL_CLR
+#define SCTRCONTROL_STE               MCTRCONTROL_STE
+#define SCTRCONTROL_RASEMU            MCTRCONTROL_RASEMU
+#define SCTRCONTROL_BPFRZ             MCTRCONTROL_BPFRZ
+#define SCTRCONTROL_LCOFIFRZ          MCTRCONTROL_LCOFIFRZ
+#define SCTRCONTROL_DEPTH_MASK        MCTRCONTROL_DEPTH_MASK
+#define SCTRCONTROL_EXCINH            MCTRCONTROL_EXCINH
+#define SCTRCONTROL_INTRINH           MCTRCONTROL_INTRINH
+#define SCTRCONTROL_TRETINH           MCTRCONTROL_TRETINH
+#define SCTRCONTROL_BRINH             MCTRCONTROL_BRINH
+#define SCTRCONTROL_ETEN              MCTRCONTROL_ETEN
+#define SCTRCONTROL_INDCALL_INH       MCTRCONTROL_INDCALL_INH
+#define SCTRCONTROL_DIRCALL_INH       MCTRCONTROL_DIRCALL_INH
+#define SCTRCONTROL_INDJUMP_INH       MCTRCONTROL_INDJUMP_INH
+#define SCTRCONTROL_DIRJUMP_INH       MCTRCONTROL_DIRJUMP_INH
+#define SCTRCONTROL_CORSWAP_INH       MCTRCONTROL_CORSWAP_INH
+#define SCTRCONTROL_RET_INH           MCTRCONTROL_RET_INH
+#define SCTRCONTROL_INDOJUMP_INH      MCTRCONTROL_INDOJUMP_INH
+#define SCTRCONTROL_DIROJUMP_INH      MCTRCONTROL_DIROJUMP_INH
+
+#define SCTRCONTROL_MASK (SCTRCONTROL_S_ENABLE | SCTRCONTROL_U_ENABLE |       \
+                          SCTRCONTROL_CLR | SCTRCONTROL_STE |                 \
+                          SCTRCONTROL_RASEMU | SCTRCONTROL_BPFRZ |            \
+                          SCTRCONTROL_LCOFIFRZ | SCTRCONTROL_DEPTH_MASK |     \
+                          SCTRCONTROL_EXCINH | SCTRCONTROL_INTRINH |          \
+                          SCTRCONTROL_TRETINH | SCTRCONTROL_BRINH |           \
+                          SCTRCONTROL_ETEN | SCTRCONTROL_INDCALL_INH |        \
+                          SCTRCONTROL_DIRCALL_INH | SCTRCONTROL_INDJUMP_INH | \
+                          SCTRCONTROL_DIRJUMP_INH | SCTRCONTROL_CORSWAP_INH | \
+                          SCTRCONTROL_RET_INH | SCTRCONTROL_INDOJUMP_INH |    \
+                          SCTRCONTROL_DIROJUMP_INH)
+
+/* sctrstatus CSR bits. */
+#define SCTRSTATUS_TOS_MASK         MCTRSTATUS_TOS_MASK
+#define SCTRSTATUS_WRAP             MCTRSTATUS_WRAP
+#define SCTRSTATUS_FROZEN           MCTRSTATUS_FROZEN
+
+#define SCTRSTATUS_MASK             (SCTRSTATUS_TOS_MASK | SCTRSTATUS_WRAP |  \
+                                     SCTRSTATUS_FROZEN)
+
+/* vsctrcontrol CSR bits. */
+#define VSCTRCONTROL_VS_ENABLE         MCTRCONTROL_S_ENABLE
+#define VSCTRCONTROL_VU_ENABLE         MCTRCONTROL_U_ENABLE
+#define VSCTRCONTROL_CLR               MCTRCONTROL_CLR
+#define VSCTRCONTROL_VSTE              MCTRCONTROL_STE
+#define VSCTRCONTROL_RASEMU            MCTRCONTROL_RASEMU
+#define VSCTRCONTROL_BPFRZ             MCTRCONTROL_BPFRZ
+#define VSCTRCONTROL_LCOFIFRZ          MCTRCONTROL_LCOFIFRZ
+#define VSCTRCONTROL_DEPTH_MASK        MCTRCONTROL_DEPTH_MASK
+#define VSCTRCONTROL_EXCINH            MCTRCONTROL_EXCINH
+#define VSCTRCONTROL_INTRINH           MCTRCONTROL_INTRINH
+#define VSCTRCONTROL_TRETINH           MCTRCONTROL_TRETINH
+#define VSCTRCONTROL_BRINH             MCTRCONTROL_BRINH
+#define VSCTRCONTROL_ETEN              MCTRCONTROL_ETEN
+#define VSCTRCONTROL_INDCALL_INH       MCTRCONTROL_INDCALL_INH
+#define VSCTRCONTROL_DIRCALL_INH       MCTRCONTROL_DIRCALL_INH
+#define VSCTRCONTROL_INDJUMP_INH       MCTRCONTROL_INDJUMP_INH
+#define VSCTRCONTROL_DIRJUMP_INH       MCTRCONTROL_DIRJUMP_INH
+#define VSCTRCONTROL_CORSWAP_INH       MCTRCONTROL_CORSWAP_INH
+#define VSCTRCONTROL_RET_INH           MCTRCONTROL_RET_INH
+#define VSCTRCONTROL_INDOJUMP_INH      MCTRCONTROL_INDOJUMP_INH
+#define VSCTRCONTROL_DIROJUMP_INH      MCTRCONTROL_DIROJUMP_INH
+
+#define VSCTRCONTROL_MASK (VSCTRCONTROL_VS_ENABLE | VSCTRCONTROL_VU_ENABLE | \
+                       VSCTRCONTROL_CLR | VSCTRCONTROL_VSTE |                \
+                       VSCTRCONTROL_RASEMU | VSCTRCONTROL_BPFRZ |            \
+                       VSCTRCONTROL_LCOFIFRZ |                               \
+                       VSCTRCONTROL_DEPTH_MASK | VSCTRCONTROL_EXCINH |       \
+                       VSCTRCONTROL_INTRINH | VSCTRCONTROL_TRETINH |         \
+                       VSCTRCONTROL_BRINH | VSCTRCONTROL_ETEN |              \
+                       VSCTRCONTROL_INDCALL_INH | VSCTRCONTROL_DIRCALL_INH | \
+                       VSCTRCONTROL_INDJUMP_INH | VSCTRCONTROL_DIRJUMP_INH | \
+                       VSCTRCONTROL_CORSWAP_INH | VSCTRCONTROL_RET_INH |     \
+                       VSCTRCONTROL_INDOJUMP_INH | VSCTRCONTROL_DIROJUMP_INH)
+
+/* sctrstatus CSR bits. */
+#define VSCTRSTATUS_TOS_MASK         MCTRSTATUS_TOS_MASK
+#define VSCTRSTATUS_WRAP             MCTRSTATUS_WRAP
+#define VSCTRSTATUS_FROZEN           MCTRSTATUS_FROZEN
+
+#define VSCTRSTATUS_MASK     (VSCTRSTATUS_TOS_MASK | VSCTRSTATUS_WRAP |  \
+                              VSCTRSTATUS_FROZEN)
+
+#define CTR_ENTRIES_FIRST                  0x200
+#define CTR_ENTRIES_LAST                   0x2ff
+
+#define CTRSOURCE_VALID                    BIT(0)
+
+#define CTRTARGET_MISP                     BIT(0)
+
+#define CTRDATA_TYPE_MASK                   0xF
+#define CTRDATA_CCV                         0x8000
+#define CTRDATA_CCM_MASK                    0xFFF0000
+#define CTRDATA_CCE_MASK                    0xF0000000
+
+#define CTRDATA_MASK            (CTRDATA_TYPE_MASK | CTRDATA_CCV |  \
+                                 CTRDATA_CCM_MASK | CTRDATA_CCE_MASK)
+
+#define CTRDATA_TYPE_NONE                   0
+#define CTRDATA_TYPE_EXCEPTION              1
+#define CTRDATA_TYPE_INTERRUPT              2
+#define CTRDATA_TYPE_EXCEP_INT_RET          3
+#define CTRDATA_TYPE_NONTAKEN_BRANCH        4
+#define CTRDATA_TYPE_TAKEN_BRANCH           5
+#define CTRDATA_TYPE_EXTERNAL_TRAP          6
+#define CTRDATA_TYPE_RESERVED               7
+#define CTRDATA_TYPE_INDIRECT_CALL          8
+#define CTRDATA_TYPE_DIRECT_CALL            9
+#define CTRDATA_TYPE_INDIRECT_JUMP          10
+#define CTRDATA_TYPE_DIRECT_JUMP            11
+#define CTRDATA_TYPE_CO_ROUTINE_SWAP        12
+#define CTRDATA_TYPE_RETURN                 13
+#define CTRDATA_TYPE_OTHER_INDIRECT_JUMP    14
+#define CTRDATA_TYPE_OTHER_DIRECT_JUMP      15
 
 /* MISELECT, SISELECT, and VSISELECT bits (AIA) */
 #define ISELECT_IPRIO0                     0x30

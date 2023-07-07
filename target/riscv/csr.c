@@ -547,6 +547,49 @@ static RISCVException pointer_masking(CPURISCVState *env, int csrno)
     return RISCV_EXCP_ILLEGAL_INST;
 }
 
+static RISCVException ctr_xmode(CPURISCVState *env, int csrno)
+{
+    /* Check if ssctr-ext/smctr-ext is present */
+    if ((csrno == CSR_MCTRCONTROL || csrno == CSR_MCTRSTATUS) &&
+            riscv_cpu_cfg(env)->ext_smctr) {
+        return RISCV_EXCP_NONE;
+    }
+
+    if ((csrno == CSR_SCTRCONTROL || csrno == CSR_SCTRSTATUS) &&
+            riscv_cpu_cfg(env)->ext_ssctr) {
+        return RISCV_EXCP_NONE;
+    }
+
+    if ((csrno == CSR_VSCTRCONTROL || csrno == CSR_VSCTRSTATUS) &&
+            riscv_cpu_cfg(env)->ext_ssctr) {
+        return hmode(env, csrno);
+    }
+
+    return RISCV_EXCP_ILLEGAL_INST;
+}
+
+static RISCVException ctr_xmode32(CPURISCVState *env, int csrno)
+{
+    if (riscv_cpu_mxl(env) != MXL_RV32) {
+        return RISCV_EXCP_ILLEGAL_INST;
+    }
+
+    /* Check if ssctr-ext/smctr-ext is present */
+    if (csrno == CSR_MCTRCONTROLH && riscv_cpu_cfg(env)->ext_smctr) {
+        return RISCV_EXCP_NONE;
+    }
+
+    if (csrno == CSR_SCTRCONTROLH && riscv_cpu_cfg(env)->ext_ssctr) {
+        return RISCV_EXCP_NONE;
+    }
+
+    if (csrno == CSR_VSCTRCONTROLH && riscv_cpu_cfg(env)->ext_ssctr) {
+        return hmode32(env, csrno);
+    }
+
+    return RISCV_EXCP_ILLEGAL_INST;
+}
+
 static int aia_hmode(CPURISCVState *env, int csrno)
 {
     if (!riscv_cpu_cfg(env)->ext_ssaia) {
@@ -2951,6 +2994,231 @@ static RISCVException write_satp(CPURISCVState *env, int csrno,
     return RISCV_EXCP_NONE;
 }
 
+static RISCVException rmw_mctrcontrol64(CPURISCVState *env, int csrno,
+                                    uint64_t *ret_val,
+                                    uint64_t new_val, uint64_t wr_mask)
+{
+    uint64_t mask = wr_mask & MCTRCONTROL_MASK & ~MCTRCONTROL_CLR;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    if (ret_val) {
+        *ret_val = env->mctrcontrol & MCTRCONTROL_MASK;
+    }
+
+    /* Correct depth. */
+    if (wr_mask & MCTRCONTROL_DEPTH_MASK) {
+        uint64_t depth = get_field(new_val & wr_mask, MCTRCONTROL_DEPTH_MASK);
+
+        if (depth <= MCTRCONTROL_DEPTH_MIN) {
+            depth = MCTRCONTROL_DEPTH_MIN;
+        } else if (depth > MCTRCONTROL_DEPTH_MAX) {
+            depth = MCTRCONTROL_DEPTH_MAX;
+        }
+
+        new_val = set_field(new_val, MCTRCONTROL_DEPTH_MASK, depth);
+    }
+
+    /* Clear ctr arrays if CLR bit is set. */
+    if (new_val & wr_mask & MCTRCONTROL_CLR) {
+        env->mctrstatus = env->mctrstatus & MCTRSTATUS_FROZEN;
+        memset(env->ctr_src, 0x0, sizeof(env->ctr_src));
+        memset(env->ctr_dst, 0x0, sizeof(env->ctr_dst));
+        memset(env->ctr_data, 0x0, sizeof(env->ctr_data));
+    }
+
+    env->mctrcontrol = (env->mctrcontrol & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException rmw_mctrcontrol(CPURISCVState *env, int csrno,
+                                  target_ulong *ret_val,
+                                  target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_mctrcontrol64(env, csrno, &rval, new_val, wr_mask);
+    if (ret_val) {
+        *ret_val = rval;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_mctrcontrolh(CPURISCVState *env, int csrno,
+                                   target_ulong *ret_val,
+                                   target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_mctrcontrol64(env, csrno, &rval,
+        ((uint64_t)new_val) << 32, ((uint64_t)wr_mask) << 32);
+    if (ret_val) {
+        *ret_val = rval >> 32;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_mctrstatus(CPURISCVState *env, int csrno,
+                                     target_ulong *ret_val,
+                                     target_ulong new_val, target_ulong wr_mask)
+{
+    uint32_t mask = wr_mask & MCTRSTATUS_MASK;
+
+    QEMU_IOTHREAD_LOCK_GUARD();
+
+    if (ret_val) {
+        *ret_val = env->mctrstatus & MCTRSTATUS_MASK;
+    }
+
+    env->mctrstatus = (env->mctrstatus & ~mask) | (new_val & mask);
+
+    return RISCV_EXCP_NONE;
+}
+
+static RISCVException rmw_sctrcontrol64(CPURISCVState *env, int csrno,
+                                    uint64_t *ret_val,
+                                    uint64_t new_val, uint64_t wr_mask)
+{
+    uint64_t mask = wr_mask & SCTRCONTROL_MASK;
+    RISCVException ret;
+
+    ret = rmw_mctrcontrol64(env, csrno, ret_val, new_val, mask);
+    if (ret_val) {
+        *ret_val &= SCTRCONTROL_MASK;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_sctrcontrol(CPURISCVState *env, int csrno,
+                                  target_ulong *ret_val,
+                                  target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_sctrcontrol64(env, csrno, &rval, new_val, wr_mask);
+    if (ret_val) {
+        *ret_val = rval;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_sctrcontrolh(CPURISCVState *env, int csrno,
+                                   target_ulong *ret_val,
+                                   target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_sctrcontrol64(env, csrno, &rval,
+        ((uint64_t)new_val) << 32, ((uint64_t)wr_mask) << 32);
+    if (ret_val) {
+        *ret_val = rval >> 32;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_sctrstatus(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & SCTRSTATUS_MASK;
+    RISCVException ret;
+
+    ret = rmw_mctrstatus(env, csrno, ret_val, new_val, mask);
+    if (ret_val) {
+        *ret_val &= SCTRSTATUS_MASK;
+    }
+
+    return ret;
+}
+
+/*
+ * Given the layout of the VSCTRCONTROL csr, we maintain it in two
+ * parts:
+ * 1: Bits 10:63 and 7 are alias of MCTRCONTROL and are stored there.
+ *
+ * 2: Bits 9, 1:2 are different in VSCTRCONTROL and are stored
+ *    separately.
+ *
+ */
+static RISCVException rmw_vsctrcontrol64(CPURISCVState *env, int csrno,
+                                    uint64_t *ret_val,
+                                    uint64_t new_val, uint64_t wr_mask)
+{
+    const uint64_t m_mask = (~0x3FF) | MCTRCONTROL_CLR;
+    const uint64_t vs_mask = VSCTRCONTROL_VSTE | VSCTRCONTROL_VS_ENABLE |
+        VSCTRCONTROL_VU_ENABLE;
+    const uint64_t vs_wr_mask = wr_mask & vs_mask;
+    uint64_t ret_m, ret_vs;
+    RISCVException ret;
+
+    ret_vs = env->vsctrcontrol & vs_mask;
+    env->vsctrcontrol = (env->vsctrcontrol & ~vs_wr_mask) |
+        (new_val & vs_wr_mask);
+
+    ret = rmw_mctrcontrol64(env, csrno, &ret_m, new_val, wr_mask & m_mask);
+    if (ret_val) {
+        *ret_val = ret_m | ret_vs;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_vsctrcontrol(CPURISCVState *env, int csrno,
+                                  target_ulong *ret_val,
+                                  target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_vsctrcontrol64(env, csrno, &rval, new_val, wr_mask);
+    if (ret_val) {
+        *ret_val = rval;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_vsctrcontrolh(CPURISCVState *env, int csrno,
+                                   target_ulong *ret_val,
+                                   target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t rval;
+    RISCVException ret;
+
+    ret = rmw_vsctrcontrol64(env, csrno, &rval,
+        ((uint64_t)new_val) << 32, ((uint64_t)wr_mask) << 32);
+    if (ret_val) {
+        *ret_val = rval >> 32;
+    }
+
+    return ret;
+}
+
+static RISCVException rmw_vsctrstatus(CPURISCVState *env, int csrno,
+                                    target_ulong *ret_val,
+                                    target_ulong new_val, target_ulong wr_mask)
+{
+    uint64_t mask = wr_mask & VSCTRSTATUS_MASK;
+    RISCVException ret;
+
+    ret = rmw_sctrstatus(env, csrno, ret_val, new_val, mask);
+    if (ret_val) {
+        *ret_val &= VSCTRSTATUS_MASK;
+    }
+
+    return ret;
+}
+
 static int read_vstopi(CPURISCVState *env, int csrno, target_ulong *val)
 {
     int irq, ret;
@@ -4645,6 +4913,25 @@ riscv_csr_operations csr_ops[CSR_TABLE_SIZE] = {
     [CSR_SPMBASE] =    { "spmbase", pointer_masking, read_spmbase,
                          write_spmbase                                      },
 
+    [CSR_MCTRCONTROL]       = { "mctrcontrol",       ctr_xmode, NULL, NULL,
+                                rmw_mctrcontrol },
+    [CSR_MCTRSTATUS]       = { "mctrstatus",       ctr_xmode, NULL, NULL,
+                                rmw_mctrstatus },
+    [CSR_SCTRCONTROL]       = { "sctrcontrol",       ctr_xmode, NULL, NULL,
+                                rmw_sctrcontrol },
+    [CSR_SCTRSTATUS]       = { "sctrstatus",       ctr_xmode, NULL, NULL,
+                                rmw_sctrstatus },
+    [CSR_VSCTRCONTROL]      = { "vsctrcontrol",      ctr_xmode, NULL, NULL,
+                                rmw_vsctrcontrol },
+    [CSR_VSCTRSTATUS]      = { "vsctrstatus",      ctr_xmode, NULL, NULL,
+                                rmw_vsctrstatus },
+
+    [CSR_MCTRCONTROLH]       = { "mctrcontrolh",       ctr_xmode32, NULL, NULL,
+                                rmw_mctrcontrolh },
+    [CSR_SCTRCONTROLH]       = { "sctrcontrolh",       ctr_xmode32, NULL, NULL,
+                                rmw_sctrcontrolh },
+    [CSR_VSCTRCONTROLH]      = { "vsctrcontrolh",      ctr_xmode32, NULL, NULL,
+                                rmw_vsctrcontrolh },
     /* Performance Counters */
     [CSR_HPMCOUNTER3]    = { "hpmcounter3",    ctr,    read_hpmcounter },
     [CSR_HPMCOUNTER4]    = { "hpmcounter4",    ctr,    read_hpmcounter },
