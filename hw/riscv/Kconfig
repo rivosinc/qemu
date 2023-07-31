@@ -4,6 +4,9 @@ config RISCV_NUMA
 config IBEX
     bool
 
+config RISCV_RAS
+    bool
+    
 # RISC-V machines in alphabetical order
 
 config MICROCHIP_PFSOC
@@ -43,6 +46,7 @@ config RISCV_VIRT
     select SIFIVE_TEST
     select VIRTIO_MMIO
     select FW_CFG_DMA
+    select RISCV_RAS
     select PLATFORM_BUS
     select ACPI
 
