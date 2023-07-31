@@ -702,7 +702,8 @@ typedef enum RISCVException {
 #define IRQ_M_EXT                          11
 #define IRQ_S_GEXT                         12
 #define IRQ_PMU_OVF                        13
-#define IRQ_LOCAL_MAX                      16
+#define IRQ_RAS_HIGH                       43
+#define IRQ_LOCAL_MAX                      64
 #define IRQ_LOCAL_GUEST_MAX                (TARGET_LONG_BITS - 1)
 
 /* mip masks */
@@ -720,6 +721,7 @@ typedef enum RISCVException {
 #define MIP_MEIP                           (1 << IRQ_M_EXT)
 #define MIP_SGEIP                          (1 << IRQ_S_GEXT)
 #define MIP_LCOFIP                         (1 << IRQ_PMU_OVF)
+#define MIP_RASHIP                         (1UL << IRQ_RAS_HIGH) 
 
 /* sip masks */
 #define SIP_SSIP                           MIP_SSIP
