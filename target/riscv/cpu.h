@@ -494,6 +494,7 @@ void riscv_cpu_set_mode(CPURISCVState *env, target_ulong newpriv);
 void riscv_ctr_freeze(CPURISCVState *env, uint64_t freeze_mask);
 void riscv_ctr_add_entry(CPURISCVState *env, target_long src, target_long dst,
                          uint64_t type, target_ulong prev_priv, bool prev_virt);
+void riscv_ctr_clear(CPURISCVState *env);
 
 void riscv_translate_init(void);
 G_NORETURN void riscv_raise_exception(CPURISCVState *env,

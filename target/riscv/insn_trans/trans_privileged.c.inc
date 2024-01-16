@@ -67,6 +67,16 @@ static bool trans_ebreak(DisasContext *ctx, arg_ebreak *a)
     return true;
 }
 
+static bool trans_sctrclr(DisasContext *ctx, arg_sctrclr *a)
+{
+#ifndef CONFIG_USER_ONLY
+    gen_helper_ctr_clear(cpu_env);
+    return true;
+#else
+    return false;
+#endif
+}
+
 static bool trans_uret(DisasContext *ctx, arg_uret *a)
 {
     return false;
@@ -125,10 +135,5 @@ static bool trans_sfence_vma(DisasContext *ctx, arg_sfence_vma *a)
     gen_helper_tlb_flush(cpu_env);
     return true;
 #endif
-    return false;
-}
-
-static bool trans_sfence_vm(DisasContext *ctx, arg_sfence_vm *a)
-{
     return false;
 }
